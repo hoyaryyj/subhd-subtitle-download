@@ -37,7 +37,7 @@ class LocalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             source = root / 'source.eng.srt'
-            source.write_text(SRT)
+            source.write_text(SRT, encoding='utf-8')
             video = root / 'Movie.mp4'
             target = video.with_suffix('.srt')
             original_open = Path.open
@@ -99,11 +99,11 @@ class LocalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             files = [Path(d, n) for n in ('a.eng.srt', 'b.eng.srt')]
             for p in files:
-                p.write_text(SRT)
+                p.write_text(SRT, encoding='utf-8')
             with self.assertRaises(local.SubtitleError):
                 local.select_subtitle(files, 'Movie.mp4', 'eng')
             unknown = Path(d, 'subtitle.srt')
-            unknown.write_text(SRT)
+            unknown.write_text(SRT, encoding='utf-8')
             with self.assertRaises(local.SubtitleError):
                 local.select_subtitle([unknown], 'Movie.mp4')
             self.assertEqual(local.select_subtitle([unknown], 'Movie.mp4', 'any'), unknown)
@@ -116,7 +116,7 @@ class LocalTests(unittest.TestCase):
             files = [root / folder / 'Show.S01E10.srt' for folder in ('ChsEng', 'Eng')]
             for path in files:
                 path.parent.mkdir()
-                path.write_text(SRT)
+                path.write_text(SRT, encoding='utf-8')
             self.assertEqual(local.select_subtitle(files, 'Show.S01E10.mp4', 'eng', source_root=root), files[1])
             self.assertEqual(local.select_subtitle(files, 'Show.S01E10.mp4', 'any', source_root=root, selected_file='Eng/Show.S01E10.srt'), files[1])
 
@@ -165,7 +165,7 @@ class LocalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             source = root / 'source.eng.srt'
-            source.write_text(SRT)
+            source.write_text(SRT, encoding='utf-8')
             video = root / '电影 (2025).S1E1.8.00.A.M..mp4'
             status, target = local.install_subtitle(source, video)
             self.assertEqual(target.name, '电影 (2025).S1E1.8.00.A.M..srt')
@@ -182,12 +182,12 @@ class LocalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             source = root / 'S01E01.eng.srt'
-            source.write_text(SRT)
+            source.write_text(SRT, encoding='utf-8')
             payload = root / 'bundle.7z'
             seven = shutil.which('7zz') or shutil.which('7z')
             subprocess.run([seven, 'a', str(payload), source.name], cwd=root, check=True, capture_output=True)
             files = local.unpack_payload(payload, root / 'out')
-            self.assertEqual(local.select_subtitle(files, 'Show.S01E01.mp4', 'eng').read_text(), SRT)
+            self.assertEqual(local.select_subtitle(files, 'Show.S01E01.mp4', 'eng').read_text(encoding='utf-8'), SRT)
 
 
 class NetworkTests(unittest.TestCase):
@@ -290,7 +290,7 @@ class CliTests(unittest.TestCase):
         report = self.root / 'report.json'
         def fake_download(sid, directory, cookie, insecure=False):
             payload = Path(directory) / 'Movie.eng.srt'
-            payload.write_text(SRT)
+            payload.write_text(SRT, encoding='utf-8')
             return payload
         with patch.object(app, 'download_payload', side_effect=fake_download), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             try:
@@ -333,7 +333,7 @@ class CliTests(unittest.TestCase):
         video.touch()
         def fake_download(sid, directory, cookie, insecure=False):
             payload = Path(directory) / 'Show.S01E01.S01E02.eng.srt'
-            payload.write_text(SRT)
+            payload.write_text(SRT, encoding='utf-8')
             return payload
         with patch.object(app, 'download_payload', side_effect=fake_download), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = app.main(['--sid', 'Ab12Cd', '--video', str(video), '--language', 'eng'])
@@ -358,7 +358,7 @@ class CliTests(unittest.TestCase):
         with patch.object(app, 'download_payload', side_effect=fake_download), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = app.main(['--sid', 'Ab12Cd', '--dir', str(self.root), '--language', 'eng', '--report', str(report)])
         self.assertEqual(code, 1)
-        data = json.loads(report.read_text())['results']
+        data = json.loads(report.read_text(encoding='utf-8'))['results']
         self.assertEqual([row['status'] for row in data], ['skipped_existing', 'written', 'failed'])
         self.assertEqual(videos[0].with_suffix('.srt').read_text(), 'existing')
         self.assertIn('Episode Ten', videos[1].with_suffix('.srt').read_text(encoding='utf-8-sig'))
