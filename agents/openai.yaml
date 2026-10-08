@@ -1,0 +1,4 @@
+interface:
+  display_name: "SubHD 字幕下载"
+  short_description: "搜索电影与剧集字幕，按真实季集号匹配本地视频，支持可选语言和整季处理"
+  default_prompt: "使用 $subhd-subtitle-download 为指定电影或剧集查找合适字幕，核验语言和版本后保存，并保留已有字幕。"

@@ -1,335 +1,370 @@
 #!/usr/bin/env python3
-"""
-subhd.cc 字幕下载参考实现。
-
-用法：
-    # 单集：传 sid + 对应 mkv 路径
-    python3 download_subtitle.py --sid 123456 --mkv "/path/to/Show.S01E01.mkv"
-
-    # 整季：传剧集目录 + sid 列表（按集顺序，逗号分隔）
-    python3 download_subtitle.py --dir "/path/to/Show Season 1" --sids 111,222,333
-
-详细流程与坑见 ../SKILL.md。
-"""
-
+"""Portable SubHD CLI. See --help and ../SKILL.md."""
 import argparse
-import glob
+import codecs
+import html
+from html.parser import HTMLParser
 import json
+import math
 import os
+from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
-UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+from subtitle_files import (
+    SubtitleError, VIDEO_EXTENSIONS, decode_subtitle, detect_subtitle_format,
+    install_subtitle, parse_episode, select_subtitle, unpack_payload,
 )
-BASE = "https://www.subhd.cc"
+
+BASE = 'https://www.subhd.cc'
+UA = 'Mozilla/5.0 SubHDSubtitleDownload/2.0'
+
+
+class RateLimited(SubtitleError):
+    pass
 
 
 def curl(args, insecure=False, timeout=60):
-    """统一 curl 调用，返回 (returncode, stdout, stderr)。exit 35 自动降级 -k 重试。"""
-    cmd = ["curl", "-s", "-S", "--max-time", str(timeout), "--retry", "3", "--retry-delay", "4"]
+    """Never downgrade TLS automatically; POST token requests are not replayed."""
+    cmd = ['curl', '--silent', '--show-error', '--fail', '--location',
+           '--max-redirs', '3', '--retry-max-time', '30', '--proto', '=https', '--proto-redir', '=https',
+           '--connect-timeout', '15', '--max-time', str(timeout),
+           '--max-filesize', str(64 * 1024 * 1024)]
+    if '-X' not in args:
+        cmd += ['--retry', '2', '--retry-delay', '3']
     if insecure:
-        cmd.append("-k")
-    cmd += args
-    p = subprocess.run(cmd, capture_output=True)
-    # exit 35（TLS 握手失败）且未降级时，自动 -k 重试一次（覆盖全链路，见坑 11）
-    if p.returncode == 35 and not insecure:
-        print("  [warn] curl exit 35, 降级 -k 重试", file=sys.stderr)
-        return curl(args, insecure=True, timeout=timeout)
-    return p.returncode, p.stdout, p.stderr
+        cmd.append('--insecure')
+    result = subprocess.run(cmd + args, capture_output=True)
+    return result.returncode, result.stdout, result.stderr
 
 
-def download_one(sid, mkv_path, cookie_jar):
-    """
-    走完整 4 步链下载一个 sid 的字幕，落到 mkv_path 同目录的 .srt。
-    返回 (ok: bool, info: str)。info 为目标路径（成功）或失败原因（失败）。
-    失败原因 'rate_limited' 表示命中限流，调用方可退避后重试。
-    """
-    headers = [
-        "-H", f"User-Agent: {UA}",
-        "-H", f"Referer: {BASE}/a/{sid}",
-        "-H", "X-Requested-With: XMLHttpRequest",
-    ]
+def validate_sid(value):
+    parsed = urlsplit(value)
+    if parsed.scheme:
+        if parsed.scheme != 'https' or parsed.hostname not in ('subhd.cc', 'www.subhd.cc'):
+            raise SubtitleError('请提供 SubHD 的 https://www.subhd.cc/a/<sid> 地址')
+        match = re.fullmatch(r'/a/([A-Za-z0-9]+)/*', parsed.path)
+        value = match.group(1) if match else ''
+    if not re.fullmatch(r'[A-Za-z0-9]+', value):
+        raise SubtitleError('sid 必须是字母数字字符串或 SubHD /a/ 页面 URL')
+    return value
 
-    # 步骤 1: prepare-download
-    rc, out, err = curl([
-        "-X", "POST", f"{BASE}/api/sub/prepare-download",
-        "-H", "Content-Type: application/json",
-        "-d", json.dumps({"sid": sid}),
-        "-b", cookie_jar, "-c", cookie_jar,
-        *headers,
-    ])
-    if rc != 0:
-        return False, f"prepare curl exit {rc}: {err.decode(errors='replace')[:200]}"
+
+def trusted_url(value, activation=False):
+    if not isinstance(value, str) or not value:
+        raise SubtitleError('上游没有返回有效下载地址')
+    url = urljoin(BASE + '/', value)
+    parsed = urlsplit(url)
+    # Do not accept arbitrary hosts/private URLs from an upstream response.
+    allowed = {'subhd.cc', 'www.subhd.cc'}
+    allowed_host = parsed.hostname in allowed or (not activation and bool(parsed.hostname) and parsed.hostname.endswith('.subhd.me'))
+    if parsed.scheme != 'https' or not allowed_host or parsed.username or parsed.password or parsed.port not in (None, 443):
+        raise SubtitleError('下载地址不属于已支持的 SubHD HTTPS 域名；需核验站点变化')
+    if activation and not parsed.path.startswith('/down/'):
+        raise SubtitleError('上游激活地址不是 /down/；需核验站点变化')
+    return url
+
+
+def request(url, cookie_jar=None, sid=None, post=False, insecure=False, output=None):
+    args = [url, '-H', f'User-Agent: {UA}', '-H', f'Referer: {BASE}/a/{sid or ""}']
+    if cookie_jar:
+        args += ['-b', str(cookie_jar), '-c', str(cookie_jar)]
+    if post:
+        args += ['-X', 'POST', '-H', 'Content-Type: application/json',
+                 '-H', 'X-Requested-With: XMLHttpRequest', '-d', json.dumps({'sid': sid})]
+    if output:
+        args += ['-o', str(output)]
+    rc, body, stderr = curl(args, insecure=insecure)
+    if rc:
+        error = stderr.decode(errors='replace')[:240]
+        if rc == 22 and '429' in error:
+            raise RateLimited('HTTP 429：下载频率过高')
+        if rc == 22 and '403' in error:
+            raise SubtitleError('HTTP 403：站点拒绝访问或需要浏览器验证；停止自动重试')
+        raise SubtitleError(f'curl exit {rc}: {error}')
+    return body
+
+
+def api_response(body, stage):
     try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        return False, f"prepare non-JSON: {out[:200]!r}"
-    if not data.get("success"):
-        msg = str(data.get("msg", ""))
-        if "频率过高" in msg:
-            return False, "rate_limited"
-        return False, f"prepare success=false: {data}"
-    # /down/XXXXXX 激活 token
-    down_path = data.get("url")
-    if not down_path:
-        return False, "prepare no url"
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise SubtitleError(f'{stage} 返回非 JSON；可能是登录/验证页或 API 已变化') from exc
+    if not isinstance(data, dict):
+        raise SubtitleError(f'{stage} 返回的 JSON 结构不受支持')
+    msg = str(data.get('msg', ''))
+    if data.get('success') is not True:
+        if re.search(r'频率|rate.?limit|too many', msg, re.I):
+            raise RateLimited(msg)
+        raise SubtitleError(f'{stage} 失败：{msg or "success 不为 true"}')
+    return data
 
-    # 步骤 2: 激活 token（必须紧跟步骤 1，几秒内失效）
-    rc, out, err = curl([
-        f"{BASE}{down_path}",
-        "-b", cookie_jar, "-c", cookie_jar,
-        *headers,
-    ])
-    if rc != 0:
-        return False, f"activate curl exit {rc}: {err.decode(errors='replace')[:200]}"
 
-    # 步骤 3: /api/sub/down
-    rc, out, err = curl([
-        "-X", "POST", f"{BASE}/api/sub/down",
-        "-H", "Content-Type: application/json",
-        "-d", json.dumps({"sid": sid}),
-        "-b", cookie_jar, "-c", cookie_jar,
-        *headers,
-    ])
-    if rc != 0:
-        return False, f"down curl exit {rc}: {err.decode(errors='replace')[:200]}"
+def download_payload(sid, directory, cookie_jar, insecure=False):
+    sid = validate_sid(sid)
+    prepare = api_response(request(BASE + '/api/sub/prepare-download', cookie_jar, sid, True, insecure), 'prepare')
+    activation = trusted_url(prepare.get('url'), activation=True)
+    request(activation, cookie_jar, sid, insecure=insecure)
+    result = api_response(request(BASE + '/api/sub/down', cookie_jar, sid, True, insecure), 'down')
+    if result.get('pass') is not True:
+        raise SubtitleError('下载许可 pass 不为 true；可能需人工验证或配额不足')
+    file_url = trusted_url(result.get('url'))
+    filename = Path(unquote(urlsplit(file_url).path)).name
+    # Prevent path components from encoded provider filenames.
+    filename = re.sub(r'[\\/:\x00-\x1f]', '_', filename) or 'subtitle.bin'
+    payload = Path(directory) / filename
+    request(file_url, cookie_jar, sid, insecure=insecure, output=payload)
+    if not payload.is_file() or payload.stat().st_size > 64 * 1024 * 1024:
+        raise SubtitleError('下载文件缺失或超过 64 MiB 限制')
+    return payload
+
+
+def fetch_with_backoff(sid, directory, cookie, args):
+    for attempt in range(args.rate_retries + 1):
+        try:
+            return download_payload(sid, directory, cookie, args.insecure)
+        except RateLimited:
+            if attempt == args.rate_retries:
+                raise
+            wait = args.cooldown * (attempt + 1)
+            print(f'[限流] 冷却 {wait:g} 秒后重新开始下载链', file=sys.stderr, flush=True)
+            time.sleep(wait)
+
+
+def download_one(sid, mkv_path, cookie_jar, language='chs-eng', preferred_format='auto', overwrite=False):
+    """Compatibility helper; no unrelated episode fallback and no default overwrite."""
     try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        return False, f"down non-JSON: {out[:200]!r}"
-    if not data.get("success"):
-        return False, f"down success=false: {data}"
-    if not data.get("pass"):
-        return False, "down pass=false"
-    file_url = data.get("url")
-    if not file_url:
-        return False, "down no url"
-
-    # 步骤 4: 拉文件（默认不 -k，exit 35 才降级）
-    archive_fd, archive_path = tempfile.mkstemp(suffix=".arc")
-    os.close(archive_fd)
-    rc, out, err = curl([
-        file_url, "-o", archive_path,
-        "-b", cookie_jar,
-        *headers,
-    ])
-    if rc == 35:
-        print(
-            f"  [warn] TLS 握手失败 (exit 35)，降级 -k 跳过证书校验。"
-            f"URL 来自 subhd 上游：{file_url}",
-            file=sys.stderr,
-        )
-        rc, out, err = curl([
-            file_url, "-o", archive_path,
-            "-b", cookie_jar,
-            *headers,
-        ], insecure=True)
-    if rc != 0:
-        os.unlink(archive_path)
-        return False, f"file curl exit {rc}: {err.decode(errors='replace')[:200]}"
-
-    # 嗅探：拉到的可能是直接字幕文件（.srt/.ass）而非归档（坑 13）
-    with open(archive_path, "rb") as _fp:
-        _head = _fp.read(64)
-    _lu = file_url.lower()
-    _is_sub = _lu.endswith(".srt") or _lu.endswith(".ass")
-    if not _is_sub:
-        if _head[:3] == b"\xef\xbb\xbf" or _head[:2] == b"\xff\xfe":
-            _is_sub = True
-        elif _head.lstrip()[:12].lower().startswith(b"[script info]"):
-            _is_sub = True
-        elif re.search(rb"\d+\s*\r?\n\s*\d{2}:\d{2}:\d{2}", _head):
-            _is_sub = True
-    if _is_sub:
-        with open(archive_path, "rb") as _fp:
-            raw = _fp.read()
-        if raw.startswith(b"\xff\xfe"):
-            text = raw.decode("utf-16-le")
-        elif raw.startswith(b"\xef\xbb\xbf"):
-            text = raw.decode("utf-8-sig")
-        else:
-            text = raw.decode("utf-8", errors="replace")
-        os.unlink(archive_path)
-        fmt = detect_subtitle_format(text)
-        if _lu.endswith(".ass") and not text.lstrip()[:64].lower().startswith("[script info]"):
-            fmt = "srt"
-        mkv_basename = os.path.basename(mkv_path)
-        base = mkv_basename[:-4] if mkv_basename.lower().endswith(".mkv") else re.sub(r"\.[^.]+$", "", mkv_basename)
-        dst = os.path.join(os.path.dirname(mkv_path), f"{base}.{fmt}")
-        with open(dst, "w", encoding="utf-8-sig") as fp:
-            fp.write(text)
-        return True, dst
-
-    # 解压：先 tar，失败 fallback 7z
-    extract_dir = tempfile.mkdtemp(prefix="subhd_extract_")
-    r = subprocess.run(["tar", "-xf", archive_path, "-C", extract_dir], capture_output=True)
-    rc, err = r.returncode, r.stderr
-    if rc != 0:
-        seven = None
-        for cand in ("7z", "7zz"):
-            if subprocess.run(["which", cand], capture_output=True).returncode == 0:
-                seven = cand
-                break
-        if not seven:
-            return False, (
-                f"tar 解压失败且无 7z：{err.decode(errors='replace')[:200]}；"
-                f"请 brew install 7zip"
-            )
-        r = subprocess.run(
-            [seven, "x", archive_path, f"-o{extract_dir}", "-y"],
-            capture_output=True,
-        )
-        rc, err = r.returncode, r.stderr
-        if rc != 0:
-            return False, f"7z 解压失败：{err.decode(errors='replace')[:200]}"
-
-    os.unlink(archive_path)
-
-    # 找 Simplified+English 的字幕（.srt 或 .ass，坑 10）
-    srt_path = None
-    for root, _, files in os.walk(extract_dir):
-        for f in files:
-            low = f.lower()
-            if not (low.endswith(".srt") or low.endswith(".ass")):
-                continue
-            if "cht" in low or "繁体" in f:
-                continue
-            if ("简体" in f or "chs" in low) and ("英文" in f or "eng" in low):
-                srt_path = os.path.join(root, f)
-                break
-        if srt_path:
-            break
-    if not srt_path:
-        all_files = []
-        for root, _, files in os.walk(extract_dir):
-            all_files.extend(files)
-        return False, f"归档内未找到简英 srt，文件列表：{all_files[:10]}"
-
-    # 转码：UTF-16 LE / UTF-8 BOM / UTF-8 → 写出 UTF-8 BOM
-    with open(srt_path, "rb") as fp:
-        raw = fp.read()
-    if raw.startswith(b"\xff\xfe"):
-        text = raw.decode("utf-16-le")
-    elif raw.startswith(b"\xef\xbb\xbf"):
-        text = raw.decode("utf-8-sig")
-    else:
-        text = raw.decode("utf-8", errors="replace")
-
-    # 落盘到 mkv 同目录，basename 派生（杜绝双点）；后缀按实际格式（坑 10）
-    fmt = detect_subtitle_format(text)
-    mkv_basename = os.path.basename(mkv_path)
-    if mkv_basename.lower().endswith(".mkv"):
-        base = mkv_basename[:-4]
-    else:
-        base = re.sub(r"\.[^.]+$", "", mkv_basename)
-    srt_name = f"{base}.{fmt}"
-    dst = os.path.join(os.path.dirname(mkv_path), srt_name)
-    with open(dst, "w", encoding="utf-8-sig") as fp:
-        fp.write(text)
-
-    subprocess.run(["rm", "-rf", extract_dir], capture_output=True)
-    return True, dst
+        with tempfile.TemporaryDirectory(prefix='subhd-') as d:
+            payload = download_payload(sid, d, cookie_jar)
+            files = unpack_payload(payload, Path(d) / 'files')
+            source = select_subtitle(files, mkv_path, language, preferred_format)
+            status, dst = install_subtitle(source, mkv_path, overwrite=overwrite)
+            return True, f'{status}: {dst}'
+    except (SubtitleError, OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
 
 
-def find_mkv_for_episode(directory, ep_idx):
-    """在 directory 中按 SxxExx / SxE / xExx 找第 ep_idx 集的 mkv（坑 12）。"""
-    pattern = re.compile(
-        rf"(?:[Ss]\d{{1,2}}[Ee]{ep_idx:02d}|\d{{1,2}}[xX]{ep_idx:02d})",
-    )
-    for f in sorted(os.listdir(directory)):
-        if f.lower().endswith(".mkv") and pattern.search(f):
-            return os.path.join(directory, f)
-    return None
+def video_files(directory, recursive=False):
+    root = Path(directory)
+    if not root.is_dir():
+        raise SubtitleError(f'目录不存在：{directory}（不会自动猜测相似路径）')
+    paths = root.rglob('*') if recursive else root.iterdir()
+    return sorted(p for p in paths if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS)
 
 
-def detect_subtitle_format(text):
-    """按内容嗅探字幕格式：返回 'ass' 或 'srt'（坑 10）。"""
-    head = text.lstrip()[:64].lower()
-    if head.startswith("[script info]") or "v4+ styles" in head or "dialogue:" in head:
-        return "ass"
-    return "srt"
+def find_mkv_for_episode(directory, ep_idx, season=None):
+    # Name retained for callers of the original reference script.
+    found = [p for p in video_files(directory) if parse_episode(p.stem) and
+             parse_episode(p.stem)[1] == ep_idx and (season is None or parse_episode(p.stem)[0] == season)]
+    return str(found[0]) if len(found) == 1 else None
 
 
-def main():
-    ap = argparse.ArgumentParser(description="subhd.cc 字幕下载参考实现")
-    ap.add_argument("--sid", help="单集 sid")
-    ap.add_argument("--mkv", help="单集：对应 mkv 路径")
-    ap.add_argument("--dir", help="整季：剧集目录（可含通配符，脚本会用 glob 兜底）")
-    ap.add_argument("--sids", help="整季：逗号分隔的 sid 列表，按集顺序")
-    ap.add_argument("--interval", type=int, default=45, help="集间隔秒数（默认 45）")
-    args = ap.parse_args()
+class SearchParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.current = None
+        self.items = {}
 
-    cookie_fd, cookie_jar = tempfile.mkstemp(suffix=".cookie")
-    os.close(cookie_fd)
-    failures = []
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            attrs = dict(attrs)
+            match = re.fullmatch(r'/a/([A-Za-z0-9]+)/*', urlsplit(attrs.get('href', '')).path)
+            if match:
+                self.current = (match.group(1), [attrs.get('title', '')])
 
-    try:
-        if args.sid:
-            if not args.mkv:
-                print("--sid 模式需要 --mkv", file=sys.stderr)
-                sys.exit(2)
-            ok, info = download_one(args.sid, args.mkv, cookie_jar)
-            if ok:
-                print(f"[1/1] {os.path.basename(args.mkv)} ✓ → {info}")
-            else:
-                print(f"[1/1] {os.path.basename(args.mkv)} ✗ {info}", file=sys.stderr)
-                failures.append((args.sid, info))
-        elif args.sids and args.dir:
-            sids = [s.strip() for s in args.sids.split(",") if s.strip()]
-            directory = args.dir
-            # 用 glob 兜底（避免目录名带括号时拼写错）
-            if not os.path.isdir(directory):
-                candidates = glob.glob(directory + "*")
-                if candidates:
-                    directory = candidates[0]
-            if not os.path.isdir(directory):
-                print(f"目录不存在：{args.dir}", file=sys.stderr)
-                sys.exit(2)
-            total = len(sids)
-            for i, sid in enumerate(sids, 1):
-                ep_idx = i
-                mkv = find_mkv_for_episode(directory, ep_idx)
-                if not mkv:
-                    print(f"[{i}/{total}] E{ep_idx:02d} ✗ 未找到对应 mkv", file=sys.stderr)
-                    failures.append((sid, "no mkv"))
-                    continue
-                print(f"[{i}/{total}] E{ep_idx:02d} {os.path.basename(mkv)} 下载中...")
-                ok, info = download_one(sid, mkv, cookie_jar)
-                if ok:
-                    print(f"[{i}/{total}] E{ep_idx:02d} ✓ → {info}")
+    def handle_data(self, data):
+        if self.current:
+            self.current[1].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == 'a' and self.current:
+            sid, texts = self.current
+            title = ' '.join(' '.join(texts).split())
+            if title and len(title) > len(self.items.get(sid, '')):
+                self.items[sid] = html.unescape(title)
+            self.current = None
+
+
+def search(query):
+    body = request(BASE + '/search/' + quote(query, safe=''))
+    text = body.decode('utf-8', errors='replace')
+    if re.search(r'(?i)just a moment|cf-chl-|captcha', text):
+        raise SubtitleError('搜索遇到浏览器验证；请用可用浏览器搜索并复制 /a/ 地址')
+    parser = SearchParser()
+    parser.feed(text)
+    if not parser.items:
+        raise SubtitleError('未解析到候选条目；可能无结果、需要验证或页面结构已变，请用浏览器核查')
+    return [{'sid': sid, 'title': title, 'url': BASE + '/a/' + sid} for sid, title in parser.items.items()]
+
+
+def doctor():
+    result = {'python': sys.version.split()[0], 'platform': sys.platform,
+              'curl': shutil.which('curl'), '7zip': shutil.which('7zz') or shutil.which('7z'),
+              'zip': 'Python 标准库，无需安装',
+              'network_checked': False, 'ready': bool(shutil.which('curl')) and sys.version_info >= (3, 9)}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if sys.version_info < (3, 9):
+        print('请安装 Python 3.9 或更新版本。', file=sys.stderr)
+    if not result['curl']:
+        print('请安装 curl 并加入 PATH。Windows 10/11 通常已有 curl.exe；Linux 用系统包管理器安装。', file=sys.stderr)
+    if not result['7zip']:
+        print('可处理 ZIP/直接字幕。7z/RAR 需另装 7-Zip：macOS brew install sevenzip；Linux 安装 7zip/p7zip-full；Windows 安装 7-Zip 并将 7z.exe 所在目录加入 PATH。', file=sys.stderr)
+    return 0 if result['ready'] else 2
+
+
+def argument_parser():
+    ap = argparse.ArgumentParser(description='SubHD 字幕搜索/下载：Python 3.9+、curl；ZIP 无额外依赖')
+    ap.add_argument('--doctor', action='store_true', help='检查本地依赖，不联网或修改配置')
+    ap.add_argument('--search', metavar='QUERY', help='搜索候选条目（JSON 输出，不自动选择或下载）')
+    ap.add_argument('--sid', help='单条 sid 或 https://www.subhd.cc/a/<sid>；可配 --video 或 --dir')
+    ap.add_argument('--video', '--mkv', dest='video', help='电影或剧集视频路径；兼容旧 --mkv')
+    ap.add_argument('--name', help='没有本地视频时的输出基本名（不含字幕后缀），需 --output-dir')
+    ap.add_argument('--dir', help='视频目录：单 sid 整季包，或 --sids 按集号分配')
+    ap.add_argument('--sids', help='旧批量模式：逗号分隔 sid 列表，从 --start-episode 起依次对应集号')
+    ap.add_argument('--season', type=int, help='目录模式只处理指定季；--sids 多季目录时必须指定')
+    ap.add_argument('--start-episode', type=int, default=1, help='--sids 第一条对应集号，默认 1')
+    ap.add_argument('--recursive', action='store_true', help='递归扫描视频目录（默认仅当前层）')
+    ap.add_argument('--language', choices=['chs-eng', 'cht-eng', 'chs', 'cht', 'zh-eng', 'zh', 'eng', 'any'], default='chs-eng', help='默认简英双语；any 允许无语言标记，但仍拒绝候选歧义')
+    ap.add_argument('--format', choices=['auto', 'srt', 'ass', 'ssa', 'vtt'], default='auto', help='默认按实际内容识别，优先 SRT，不做格式转换')
+    ap.add_argument('--select-file', help='明确选择归档内相对路径，如 Eng/Show.S01E01.srt；仍校验季集和语言')
+    ap.add_argument('--encoding', help='可选源编码，如 big5；默认 UTF BOM/UTF-8/GB18030')
+    ap.add_argument('--output-dir', help='输出目录，默认视频旁；文件名保持视频 stem 原样')
+    ap.add_argument('--overwrite', action='store_true', help='明确允许替换同名字幕（默认保留）')
+    ap.add_argument('--interval', type=float, default=45, help='多个 sid 下载之间间隔秒数，默认 45')
+    ap.add_argument('--cooldown', type=float, default=120, help='命中限流后的首次冷却秒数，默认 120')
+    ap.add_argument('--rate-retries', type=int, choices=range(4), default=1, help='限流后重试次数 0..3，默认 1；403/验证码不重试')
+    ap.add_argument('--report', help='保存 JSON 结果（必须是尚不存在的路径）')
+    ap.add_argument('--insecure', action='store_true', help='显式跳过 TLS 证书验证；不会自动启用')
+    return ap
+
+
+def validate_args(args):
+    if args.doctor or args.search:
+        if args.doctor and args.search or args.sid or args.sids or args.video or args.name or args.dir:
+            raise SubtitleError('--doctor/--search 必须单独使用')
+        return []
+    if bool(args.sid) == bool(args.sids) or sum(bool(v) for v in (args.video, args.name, args.dir)) != 1:
+        raise SubtitleError('需要 --sid + --video/--dir/--name，或 --sids + --dir')
+    if args.sids and not args.dir:
+        raise SubtitleError('--sids 需要 --dir')
+    if not math.isfinite(args.interval) or not math.isfinite(args.cooldown) or args.interval < 0 or args.cooldown < 0 or args.start_episode < 1 or args.season is not None and args.season < 0:
+        raise SubtitleError('间隔/冷却/季号不能为负；起始集号必须为正')
+    if args.encoding:
+        try:
+            codecs.lookup(args.encoding)
+        except LookupError as exc:
+            raise SubtitleError('未知编码：' + args.encoding) from exc
+    if args.report:
+        report = Path(args.report)
+        if report.exists() or not report.parent.is_dir():
+            raise SubtitleError('报告路径已存在或父目录不存在；请选择新路径')
+    if args.name:
+        if not args.output_dir or re.search(r'[\\/<>:"|?*\x00-\x1f]', args.name) or args.name in ('.', '..') or args.name.endswith((' ', '.')):
+            raise SubtitleError('--name 需要 --output-dir，且基本名不能含路径分隔符或不通用的文件名字符')
+        return [(validate_sid(args.sid), [Path(args.output_dir) / (args.name + '.mp4')])]
+    if args.video:
+        video = Path(args.video)
+        if not video.is_file() or video.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise SubtitleError(f'视频不存在或格式不受支持：{video}')
+        parse_episode(video.stem)
+        return [(validate_sid(args.sid), [video])]
+    videos = video_files(args.dir, args.recursive)
+    if args.season is not None:
+        videos = [v for v in videos if parse_episode(v.stem) and parse_episode(v.stem)[0] == args.season]
+    if not videos:
+        raise SubtitleError('未找到符合条件的视频')
+    if args.sid:
+        if any(parse_episode(v.stem) is None for v in videos):
+            raise SubtitleError('--sid + --dir 整季包模式要求视频名含 S01E01/S1E1/1x01；电影用 --video')
+        return [(validate_sid(args.sid), videos)]
+    sids = args.sids.split(',')
+    if not all(s.strip() for s in sids):
+        raise SubtitleError('--sids 列表包含空项')
+    seasons = {parse_episode(v.stem)[0] for v in videos if parse_episode(v.stem)}
+    if len(seasons) != 1:
+        raise SubtitleError('--sids 目录季号不唯一；请指定 --season 或分季处理')
+    jobs = []
+    for idx, sid in enumerate(sids, args.start_episode):
+        matches = [v for v in videos if parse_episode(v.stem) == (next(iter(seasons)), idx)]
+        if len(matches) != 1:
+            raise SubtitleError(f'E{idx:02d} 视频缺失或不唯一；请使用 --sid + --video 显式指定')
+        jobs.append((validate_sid(sid.strip()), matches))
+    return jobs
+
+
+def run_downloads(jobs, args):
+    results = []
+    with tempfile.TemporaryDirectory(prefix='subhd-session-') as session:
+        cookie = Path(session) / 'cookies.txt'
+        cookie.touch(mode=0o600)
+        for index, (sid, videos) in enumerate(jobs, 1):
+            print(f'[{index}/{len(jobs)}] sid={sid}，目标 {len(videos)} 个视频，下载中…', flush=True)
+            with tempfile.TemporaryDirectory(prefix='subhd-payload-') as d:
+                try:
+                    payload = fetch_with_backoff(sid, d, cookie, args)
+                    files = unpack_payload(payload, Path(d) / 'files', args.encoding)
+                except (SubtitleError, OSError, subprocess.SubprocessError, ValueError) as exc:
+                    for video in videos:
+                        identity = {'name': args.name} if args.name else {'video': str(video)}
+                        results.append({'sid': sid, **identity, 'status': 'failed', 'reason': str(exc)})
+                    print(f'  failed: {exc}', file=sys.stderr, flush=True)
                 else:
-                    if info == "rate_limited":
-                        print(f"[{i}/{total}] E{ep_idx:02d} 命中限流，冷却 120s...", file=sys.stderr)
-                        time.sleep(120)
-                        ok, info = download_one(sid, mkv, cookie_jar)
-                        if ok:
-                            print(f"[{i}/{total}] E{ep_idx:02d} ✓（重试） → {info}")
-                        else:
-                            print(f"[{i}/{total}] E{ep_idx:02d} ✗ {info}", file=sys.stderr)
-                            failures.append((sid, info))
-                    else:
-                        print(f"[{i}/{total}] E{ep_idx:02d} ✗ {info}", file=sys.stderr)
-                        failures.append((sid, info))
-                if i < total:
-                    time.sleep(args.interval)
-        else:
-            print("需要 --sid+--mkv 或 --dir+--sids", file=sys.stderr)
-            sys.exit(2)
-    finally:
-        if os.path.exists(cookie_jar):
-            os.unlink(cookie_jar)
-
-    if failures:
-        print(f"\n失败 {len(failures)} 条：", file=sys.stderr)
-        for sid, reason in failures:
-            print(f"  {sid}: {reason}", file=sys.stderr)
-        sys.exit(1)
+                    for video in videos:
+                        identity = {'name': args.name} if args.name else {'video': str(video)}
+                        label = args.name or video.name
+                        try:
+                            source = select_subtitle(files, video, args.language, args.format, allow_single=not args.dir or bool(args.sids), encoding=args.encoding, source_root=Path(d) / 'files', selected_file=args.select_file)
+                            status, target = install_subtitle(source, video, args.output_dir, args.overwrite, args.encoding)
+                            record = {'sid': sid, **identity, 'source': source.relative_to(Path(d) / 'files').as_posix(),
+                                      'status': status, 'target': str(target)}
+                            print(f'  {label}: {status} → {target}', flush=True)
+                        except (SubtitleError, OSError, UnicodeError) as exc:
+                            record = {'sid': sid, **identity, 'status': 'failed', 'reason': str(exc)}
+                            print(f'  {label}: failed: {exc}', file=sys.stderr, flush=True)
+                        results.append(record)
+            if index < len(jobs):
+                print(f'等待 {args.interval:g} 秒后处理下一条 sid', flush=True)
+                time.sleep(args.interval)
+    if args.report:
+        with Path(args.report).open('x', encoding='utf-8') as fp:
+            json.dump({'results': results}, fp, ensure_ascii=False, indent=2)
+    counts = {key: sum(r['status'] == key for r in results) for key in ('written', 'unchanged', 'skipped_existing', 'failed')}
+    print(json.dumps(counts, ensure_ascii=False), flush=True)
+    return 1 if counts['failed'] else 0
 
 
-if __name__ == "__main__":
-    main()
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+    ap = argument_parser()
+    args = ap.parse_args(argv)
+    try:
+        jobs = validate_args(args)
+        if args.doctor:
+            return doctor()
+        if sys.version_info < (3, 9):
+            raise SubtitleError('需要 Python 3.9 或更新版本')
+        if not shutil.which('curl'):
+            raise SubtitleError('缺少 curl；请先运行 --doctor')
+        if args.insecure:
+            print('[警告] --insecure 已显式开启，本次 HTTPS 不验证证书', file=sys.stderr, flush=True)
+        if args.search:
+            print(json.dumps(search(args.search), ensure_ascii=False, indent=2))
+            return 0
+        return run_downloads(jobs, args)
+    except (SubtitleError, OSError, subprocess.SubprocessError, ValueError) as exc:
+        print(f'错误：{exc}', file=sys.stderr, flush=True)
+        return 2
+    except KeyboardInterrupt:
+        print('已中断，临时下载和 cookie 已清理；已完成文件保留', file=sys.stderr)
+        return 130
+
+
+if __name__ == '__main__':
+    sys.exit(main())
