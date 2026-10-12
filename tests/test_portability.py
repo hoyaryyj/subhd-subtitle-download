@@ -133,6 +133,17 @@ class LocalTests(unittest.TestCase):
             self.assertEqual(target.suffix, '.ass')
             self.assertEqual(target.read_text(encoding='utf-8-sig'), ASS)
 
+    def test_appledouble_members_are_ignored(self):
+        # 本机补丁（坑 16）：归档里夹带的 macOS `._xxx.srt` 伴生文件不能参与选档
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            payload = root / 'bundle.zip'
+            with zipfile.ZipFile(payload, 'w') as z:
+                z.writestr('._Show.S01E01.eng.srt', b'\x00\x05\x16\x07')
+                z.writestr('Show.S01E01.eng.srt', SRT)
+            files = local.unpack_payload(payload, root / 'out')
+            self.assertEqual([p.name for p in files], ['Show.S01E01.eng.srt'])
+
     def test_html_disguised_as_srt_is_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             payload = Path(d, 'subtitle.srt')
@@ -210,15 +221,24 @@ class NetworkTests(unittest.TestCase):
             with self.assertRaises(local.SubtitleError):
                 app.api_response(raw, 'prepare')
 
-    def test_curl_does_not_automatically_disable_tls_or_replay_posts(self):
+    def test_curl_only_downgrades_tls_after_exit_35(self):
+        # 本机补丁（坑 11）：与上游 2.0 有意不同 —— exit 35 表示 TLS 握手未完成、请求未送达，
+        # 此时自动加 --insecure 重试一次；非 35 的错误码一律不降级、不重放。
         response = subprocess.CompletedProcess([], 35, b'', b'TLS failed')
         with patch.object(app.subprocess, 'run', return_value=response) as run:
             self.assertEqual(app.curl(['https://www.subhd.cc/test', '-X', 'POST'])[0], 35)
-        self.assertEqual(run.call_count, 1)
-        command = run.call_args[0][0]
-        self.assertIn('--fail', command)
-        self.assertNotIn('--insecure', command)
-        self.assertNotIn('--retry', command)
+        self.assertEqual(run.call_count, 2)
+        first = run.call_args_list[0][0][0]
+        second = run.call_args_list[1][0][0]
+        self.assertIn('--fail', first)
+        self.assertNotIn('--insecure', first)
+        self.assertNotIn('--retry', first)
+        self.assertIn('--insecure', second)
+        failed = subprocess.CompletedProcess([], 7, b'', b'connect failed')
+        with patch.object(app.subprocess, 'run', return_value=failed) as other:
+            self.assertEqual(app.curl(['https://www.subhd.cc/test'])[0], 7)
+        self.assertEqual(other.call_count, 1)
+        self.assertNotIn('--insecure', other.call_args[0][0])
 
     def test_http_403_and_429_are_not_success(self):
         for message, error in ((b'HTTP 403', local.SubtitleError), (b'HTTP 429', app.RateLimited)):
@@ -278,6 +298,14 @@ class CliTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(script), '--doctor'], capture_output=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)['ready'])
+
+    def test_appledouble_files_are_not_treated_as_videos(self):
+        # 本机补丁（坑 16）：SMB 卷上的 `._xxx.mkv` 必须在扫描阶段被跳过
+        real = self.root / 'Show.S01E01.mkv'
+        real.touch()
+        (self.root / '._Show.S01E01.mkv').touch()
+        self.assertEqual([p.name for p in app.video_files(str(self.root))], ['Show.S01E01.mkv'])
+        self.assertEqual(app.find_mkv_for_episode(str(self.root), 1), str(real))
 
     def test_legacy_mkv_and_modern_video_flags(self):
         video = self.root / 'Movie.mp4'

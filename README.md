@@ -78,7 +78,7 @@ py -3 scripts/download_subtitle.py --sid "<sid>" --video "D:\Movies\Movie.mp4" -
 | `--report` | 将每个目标的成功/保留/失败结果保存为新的 JSON 文件，父目录需存在 |
 | `--interval` | 多 sid 间隔默认 45 秒 |
 | `--cooldown` / `--rate-retries` | 明确限流默认冷却 120 秒后重试一次；最多可设置 3 次 |
-| `--insecure` | 仅在明确接受风险时跳过证书验证；TLS 失败不会自动开启 |
+| `--insecure` | 显式跳过证书验证。**本机补丁**：curl exit 35 时会自动降级重试一次（见文末），显式指定则全程使用 |
 
 完整选项用 `--help` 查看。语言筛选基于文件名和归档内的语言子目录：`zh-eng` 表示中文与英文但未标注简繁，不能当作纯英文；`any` 允许无语言标记，仍拒绝多候选歧义。默认不回退到用户没要求的语言。
 
@@ -101,6 +101,17 @@ python3 -m unittest discover -s tests -v
 测试涵盖错集、防覆盖、语言筛选、编码、实际格式、归档路径和 API/HTTP 失败。发现可用 7-Zip 时会实测创建与解压 7z，否则跳过该项。CI 配置覆盖 macOS、Linux、Windows 的 Python 3.9 和 3.13，不做实时站点请求；CI 以各次实际运行结果为准；本地通过不能代替其他平台的验证。
 
 入口为 [SKILL.md](SKILL.md)，CLI 位于 [scripts/download_subtitle.py](scripts/download_subtitle.py)，本地处理位于 [scripts/subtitle_files.py](scripts/subtitle_files.py)。字幕版权归相应权利方，使用应符合用户取得的授权。
+
+## 本机补丁（相对上游 2.0）
+
+本副本基于上游 `06705a7`，回补了 2 处上游未覆盖的实战补丁（详见 [SKILL.md](SKILL.md) 的「本机补充」节）：
+
+1. **坑 11**：`curl()` 遇 exit 35（TLS 握手失败）且未显式 `--insecure` 时，自动降级重试一次，覆盖全链路。
+   上游 2.0 有意不自动降级，对应用例已在本机改写为 `test_curl_only_downgrades_tls_after_exit_35`。
+2. **坑 16**：`video_files()` 与 `unpack_payload()` 跳过 macOS AppleDouble 伴生文件（`._xxx.mkv` / `._xxx.srt`），
+   避免在 SMB 卷上把字幕落盘成 `._xxx.srt`。
+
+旧版 16 条坑与 6 处补丁存档于 git 分支 `archive/local-patches`。
 
 ---
 
