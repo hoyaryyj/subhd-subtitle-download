@@ -195,7 +195,10 @@ def unpack_payload(payload, destination, encoding=None):
         # Preserve the provider filename for episode/language selection.
         target = destination / (payload.stem + '.' + fmt)
         target.write_bytes(payload.read_bytes())
-    return sorted(p for p in destination.rglob('*') if p.is_file() and p.suffix.lower() in SUBTITLE_EXTENSIONS)
+    # 本机补丁（坑 16）：归档内也可能夹带 macOS AppleDouble 伴生文件（`._xxx.srt`），
+    # 同样按后缀命中但内容不可用，这里一并跳过。
+    return sorted(p for p in destination.rglob('*')
+                  if p.is_file() and not p.name.startswith('._') and p.suffix.lower() in SUBTITLE_EXTENSIONS)
 
 
 def install_subtitle(source, video, output_dir=None, overwrite=False, encoding=None):

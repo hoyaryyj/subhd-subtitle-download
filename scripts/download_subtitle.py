@@ -30,7 +30,15 @@ class RateLimited(SubtitleError):
 
 
 def curl(args, insecure=False, timeout=60):
-    """Never downgrade TLS automatically; POST token requests are not replayed."""
+    """
+    统一 curl 调用。
+
+    本机补丁（坑 11）：默认不主动降级 TLS；仅当 curl exit 35（TLS 握手失败）时，
+    自动加 --insecure 重试一次，覆盖 prepare / activate / down / 文件拉取全链路。
+    exit 35 表示握手未完成、HTTP 请求尚未送达服务端，重试不会重复消费 token；
+    上游 2.0 有意不做此降级（对应测试已在本机同步改写），本机网络（Clash/TUN）实测
+    prepare 与 /api/sub/down 两步都可能撞上 exit 35，故保留。
+    """
     cmd = ['curl', '--silent', '--show-error', '--fail', '--location',
            '--max-redirs', '3', '--retry-max-time', '30', '--proto', '=https', '--proto-redir', '=https',
            '--connect-timeout', '15', '--max-time', str(timeout),
@@ -40,6 +48,10 @@ def curl(args, insecure=False, timeout=60):
     if insecure:
         cmd.append('--insecure')
     result = subprocess.run(cmd + args, capture_output=True)
+    if result.returncode == 35 and not insecure:
+        print('[warn] curl exit 35（TLS 握手失败），降级 --insecure 重试一次；'
+              '本次跳过证书校验，目标 URL 来自 SubHD 上游', file=sys.stderr, flush=True)
+        return curl(args, insecure=True, timeout=timeout)
     return result.returncode, result.stdout, result.stderr
 
 
@@ -154,7 +166,11 @@ def video_files(directory, recursive=False):
     if not root.is_dir():
         raise SubtitleError(f'目录不存在：{directory}（不会自动猜测相似路径）')
     paths = root.rglob('*') if recursive else root.iterdir()
-    return sorted(p for p in paths if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS)
+    # 本机补丁（坑 16）：SMB/外置卷上的 macOS AppleDouble 伴生文件 `._xxx.mkv` 同样以视频
+    # 后缀结尾，且 ASCII 排序时排在真视频前面，会被当成视频命中并把字幕写成 `._xxx.srt`
+    # （播放器不加载）。一律跳过 `._` 开头的文件。
+    return sorted(p for p in paths
+                  if p.is_file() and not p.name.startswith('._') and p.suffix.lower() in VIDEO_EXTENSIONS)
 
 
 def find_mkv_for_episode(directory, ep_idx, season=None):
