@@ -120,6 +120,12 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
    整季等跨分钟任务直接前台跑（Bash 设大 `timeout`，如 `900000`=15 分钟）；必须后台时周期性探活并持久化 task_id。
 8. **落盘前先比对目录内已有同名 srt 的 md5**：与下载结果一致说明本来就有正确字幕，无需覆盖
    （上游 `install_subtitle` 已返回 `unchanged` / `skipped_existing` 覆盖此场景）。
+9. **沙箱「升级重跑」可能在片库留下 `.subhd-*` 暂存文件**：`install_subtitle` 先用
+   `tempfile.mkstemp(dir=<视频目录>, prefix='.subhd-')` 暂存、再 `os.link` 发布，正常路径下 `finally` 会清理。
+   但若首次尝试在默认沙箱下被拦截、系统以放开沙箱的方式**重跑整条命令**，首个进程可能被中途杀掉导致 `finally` 不执行，
+   于是目标 srt 已写成功、同时残留一个同尺寸的 `.subhd-xxxxxx`。
+   2026-10-12 实测（本片）：目标与残留 md5 完全一致 `02cd7524b99bae01f03e5f12231b9ddc`，CLI 报告 `unchanged`。
+   **落盘后应 `ls` 核验目录内无 `.subhd-*` 残留**；清理用第 2 条的 `DYLD_INSERT_LIBRARIES= /bin/rm -f`，且需用户确认。
 
 ### 回补后的验证方式
 
