@@ -127,6 +127,20 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
    2026-10-12 实测（本片）：目标与残留 md5 完全一致 `02cd7524b99bae01f03e5f12231b9ddc`，CLI 报告 `unchanged`。
    **落盘后应 `ls` 核验目录内无 `.subhd-*` 残留**；清理用第 2 条的 `DYLD_INSERT_LIBRARIES= /bin/rm -f`，且需用户确认。
 
+10. **同一条目里同一语言的多个档可能残缺，必须用视频实际时长交叉校验**：MA / iTunes WEB-DL 常带多条中文字幕轨
+    （`cmn-Hans`、`cmn-Hans2`、`cmn-Hant`、`yue-Hant`），**「第一版」不一定完整**。
+    2026-11-03 实测《生化危机：爆发夜》`cEcsRu`：`cmn-Hans` 仅 835 条、末条止于 `01:26:25`；
+    `cmn-Hans2` / `cmn-Hant` / `yue-Hant` 均 940 条、末条止于 `01:33:40`；
+    `ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1` 得视频实长 **5632.768s = 1:33:52**
+    → 只有 `cmn-Hans2` 那一组的末条与片长吻合（差 12 秒），`cmn-Hans` 少 7 分 27 秒、明显残缺。
+    **做法**：解压后逐档打印「条数 + 末条时间戳」，与视频时长比对，选末条落在片长前 ~30s 内的档；
+    条数最多的那组通常才是完整轨。仅按语言标签取第一个匹配档会交付残缺字幕。
+11. **`language_of()` 不认 BCP-47 风格的中文标记**：`cmn-Hans`、`cmn-Hant`、`yue-Hant` 这类档名会被判成 `unknown`
+    （现有正则只覆盖 `zh-Hans` / `zh-CN` / `chs` / `简体` 等）。后果：`--language chs` / `cht` 匹配不到任何档，
+    `--language any` 又因同条件候选不唯一直接报错。**当前绕法**：
+    `--language any --select-file "<归档内相对路径>"` 显式指定。（根治方向：给 `language_of()` 补
+    `cmn-hans`→chs、`cmn-hant`→cht、`yue(-hant)`→独立 `yue` 的映射。）
+
 ### 回补后的验证方式
 
 ```bash
