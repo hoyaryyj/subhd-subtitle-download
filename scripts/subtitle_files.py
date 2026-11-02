@@ -63,9 +63,15 @@ def detect_subtitle_format(text):
 def language_of(name):
     name = str(name).lower()
     bilingual = any(x in name for x in ('chseng', 'chteng', '简英', '繁英'))
-    chs = bool(re.search(r'简体|简中|简英|chseng|zh[._-](?:cn|hans)|(?:^|[./\s_&-])chs(?:$|[./\s_&-])', name))
-    cht = bool(re.search(r'繁体|繁中|繁英|chteng|zh[._-](?:tw|hant)|(?:^|[./\s_&-])cht(?:$|[./\s_&-])', name))
+    # 中文标记三套写法：中文词（简体/繁体）、旧式 chs/cht、BCP-47（zh- / cmn- / yue-）。
+    # cmn-Hans / cmn-Hans2 / cmn-Hant / yue-Hant 是 MA、iTunes WEB-DL 拆轨的常见命名（本机坑 11）。
+    chs = bool(re.search(r'简体|简中|简英|chseng|zh[._-](?:cn|hans)|cmn[._-]hans|(?:^|[./\s_&-])chs(?:$|[./\s_&-])', name))
+    cht = bool(re.search(r'繁体|繁中|繁英|chteng|zh[._-](?:tw|hant)|cmn[._-]hant|(?:^|[./\s_&-])cht(?:$|[./\s_&-])', name))
+    # 粤语轨（yue / yue-Hant）单列一类，不与简繁混同，避免请求简中时拿到粤语
+    yue = bool(re.search(r'(?:^|[./\s_&-])yue(?:$|[./\s_&-])', name))
     eng = bilingual or bool(re.search(r'英文|英语|english|(?:^|[./\s_&-])(?:en|eng)(?:$|[./\s_&-])', name))
+    if yue:
+        return 'yue'
     if chs and eng:
         return 'chs-eng'
     if cht and eng:
@@ -128,7 +134,17 @@ def select_subtitle(files, video, language='chs-eng', preferred_format='auto', a
         best = min(rank[fmt] for _, fmt in valid)
         valid = [(p, fmt) for p, fmt in valid if rank[fmt] == best]
     if len(valid) != 1:
-        raise SubtitleError('没有有效字幕或同条件候选不唯一：' + ', '.join(member_name(p) for p, _ in valid))
+        # 本机坑 10：同语言多档可能残缺（实测 cmn-Hans 比 cmn-Hans2 少 7 分 27 秒）。这里仍不猜，
+        # 但把每档的条数与末条时间打出来，便于对照 ffprobe 得到的片长挑完整的那一档。
+        details = []
+        for path, fmt in valid:
+            try:
+                cues = [line.strip() for line in decode_subtitle(path.read_bytes(), encoding).splitlines() if '-->' in line]
+            except SubtitleError:
+                cues = []
+            stats = f'{len(cues)} 条' + (f'，末条 {cues[-1].split("-->")[-1].strip()}' if cues else '')
+            details.append(f'{member_name(path)}（{fmt}，{stats}）')
+        raise SubtitleError('没有有效字幕或同条件候选不唯一：' + '；'.join(details))
     return valid[0][0]
 
 
@@ -195,7 +211,7 @@ def unpack_payload(payload, destination, encoding=None):
         # Preserve the provider filename for episode/language selection.
         target = destination / (payload.stem + '.' + fmt)
         target.write_bytes(payload.read_bytes())
-    # 本机补丁（坑 16）：归档内也可能夹带 macOS AppleDouble 伴生文件（`._xxx.srt`），
+    # 本机补丁（旧坑 16：AppleDouble 过滤）：归档内也可能夹带 macOS AppleDouble 伴生文件（`._xxx.srt`），
     # 同样按后缀命中但内容不可用，这里一并跳过。
     return sorted(p for p in destination.rglob('*')
                   if p.is_file() and not p.name.startswith('._') and p.suffix.lower() in SUBTITLE_EXTENSIONS)

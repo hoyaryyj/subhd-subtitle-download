@@ -33,7 +33,7 @@ def curl(args, insecure=False, timeout=60):
     """
     统一 curl 调用。
 
-    本机补丁（坑 11）：默认不主动降级 TLS；仅当 curl exit 35（TLS 握手失败）时，
+    本机补丁（旧坑 11：TLS 降级）：默认不主动降级 TLS；仅当 curl exit 35（TLS 握手失败）时，
     自动加 --insecure 重试一次，覆盖 prepare / activate / down / 文件拉取全链路。
     exit 35 表示握手未完成、HTTP 请求尚未送达服务端，重试不会重复消费 token；
     上游 2.0 有意不做此降级（对应测试已在本机同步改写），本机网络（Clash/TUN）实测
@@ -166,7 +166,7 @@ def video_files(directory, recursive=False):
     if not root.is_dir():
         raise SubtitleError(f'目录不存在：{directory}（不会自动猜测相似路径）')
     paths = root.rglob('*') if recursive else root.iterdir()
-    # 本机补丁（坑 16）：SMB/外置卷上的 macOS AppleDouble 伴生文件 `._xxx.mkv` 同样以视频
+    # 本机补丁（旧坑 16：AppleDouble 过滤）：SMB/外置卷上的 macOS AppleDouble 伴生文件 `._xxx.mkv` 同样以视频
     # 后缀结尾，且 ASCII 排序时排在真视频前面，会被当成视频命中并把字幕写成 `._xxx.srt`
     # （播放器不加载）。一律跳过 `._` 开头的文件。
     return sorted(p for p in paths
@@ -245,7 +245,7 @@ def argument_parser():
     ap.add_argument('--season', type=int, help='目录模式只处理指定季；--sids 多季目录时必须指定')
     ap.add_argument('--start-episode', type=int, default=1, help='--sids 第一条对应集号，默认 1')
     ap.add_argument('--recursive', action='store_true', help='递归扫描视频目录（默认仅当前层）')
-    ap.add_argument('--language', choices=['chs-eng', 'cht-eng', 'chs', 'cht', 'zh-eng', 'zh', 'eng', 'any'], default='chs-eng', help='默认简英双语；any 允许无语言标记，但仍拒绝候选歧义')
+    ap.add_argument('--language', choices=['chs-eng', 'cht-eng', 'chs', 'cht', 'zh-eng', 'zh', 'eng', 'yue', 'any'], default='chs-eng', help='默认简英双语；yue 为粤语轨；any 允许无语言标记，但仍拒绝候选歧义')
     ap.add_argument('--format', choices=['auto', 'srt', 'ass', 'ssa', 'vtt'], default='auto', help='默认按实际内容识别，优先 SRT，不做格式转换')
     ap.add_argument('--select-file', help='明确选择归档内相对路径，如 Eng/Show.S01E01.srt；仍校验季集和语言')
     ap.add_argument('--encoding', help='可选源编码，如 big5；默认 UTF BOM/UTF-8/GB18030')

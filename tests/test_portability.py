@@ -81,6 +81,24 @@ class LocalTests(unittest.TestCase):
                            ('subtitle.srt', 'unknown')]:
             self.assertEqual(local.language_of(name), lang)
 
+    def test_bcp47_chinese_track_selection(self):
+        # 本机坑 11：MA / iTunes WEB-DL 拆轨的 cmn-Hans / cmn-Hant / yue-Hant 需正确归类
+        for tag, lang in (('cmn-Hans', 'chs'), ('cmn-Hans2', 'chs'), ('cmn-Hant', 'cht'),
+                          ('yue-Hant', 'yue'), ('zh-Hans', 'chs'), ('zh-Hant', 'cht')):
+            self.assertEqual(local.language_of(f'Movie.2026.2160p.MA.WEB-DL.{tag}.srt'), lang, tag)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            single = root / 'Movie.2026.2160p.MA.WEB-DL.cmn-Hans2.srt'
+            single.write_text(SRT, encoding='utf-8')
+            self.assertEqual(local.select_subtitle([single], 'Movie.2026.mp4', 'chs'), single)
+            dup = root / 'Movie.2026.2160p.MA.WEB-DL.cmn-Hans.srt'
+            dup.write_text('1\n00:00:01,000 --> 00:00:02,000\nA\n', encoding='utf-8')
+            with self.assertRaises(local.SubtitleError) as caught:
+                local.select_subtitle([single, dup], 'Movie.2026.mp4', 'chs')
+            message = str(caught.exception)
+            self.assertIn('cmn-Hans2', message)
+            self.assertIn('末条', message)
+
     def test_bundle_selects_episode_language_and_format(self):
         with tempfile.TemporaryDirectory() as d:
             files = []
@@ -313,6 +331,9 @@ class CliTests(unittest.TestCase):
         for flag in ('--mkv', '--video'):
             jobs = app.validate_args(self.args('--sid', 'Ab12Cd', flag, str(video)))
             self.assertEqual(jobs, [('Ab12Cd', [video])])
+
+    def test_yue_language_option_is_accepted(self):
+        self.assertEqual(self.args('--sid', 'Ab12Cd', '--video', 'movie.mp4', '--language', 'yue').language, 'yue')
 
     def test_download_without_video_uses_explicit_output_name(self):
         report = self.root / 'report.json'

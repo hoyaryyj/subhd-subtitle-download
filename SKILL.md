@@ -51,7 +51,7 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
 
 同条件候选不唯一时，核验归档候选列表后可用 `--select-file "Eng/Show.S01E01.srt"` 指定包内相对路径；仍会检查季集、语言和格式，不用于绕过匹配。归档将语言标记放在子目录里时也会读取该标记。
 
-语言值：`chs-eng`（默认简英）、`cht-eng`（繁英）、`chs`、`cht`、`zh-eng`（未区分简繁的中英）、`zh`（未区分简繁的中文）、`eng`、`any`。脚本根据文件名语言标记筛选，不能保证翻译质量；无标记时先核验，再按用户意图使用 `any`，不要把未知语言报告成指定语言。
+语言值：`chs-eng`（默认简英）、`cht-eng`（繁英）、`chs`、`cht`、`zh-eng`（未区分简繁的中英）、`zh`（未区分简繁的中文）、`eng`、`yue`（粤语）、`any`。脚本根据文件名语言标记筛选，不能保证翻译质量；无标记时先核验，再按用户意图使用 `any`，不要把未知语言报告成指定语言。档名采用 BCP-47 写法（`cmn-Hans`、`cmn-Hans2`、`cmn-Hant`、`yue-Hant`）时同样能识别，`cmn-Hans` 归 `chs`、`cmn-Hant` 归 `cht`、`yue-Hant` 归 `yue`。
 
 `--format auto` 按内容识别格式并优先 SRT；可指定 `srt/ass/ssa/vtt`，这是筛选，不是格式转换。源编码默认识别 UTF BOM、UTF-8、GB18030；已知其他编码用 `--encoding`，例如 `big5`。不会用替换字符掩盖解码失败。
 
@@ -65,7 +65,7 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
 - 默认在视频旁写入；`--output-dir` 可改位置。远程/NAS 路径遵守当前环境的访问权限；失败时说明路径和权限问题，不改沙箱配置或绕过文件删除保护。
 - 文件头和结构决定字幕/归档格式，ZIP 用标准库解压，7z/RAR 用可用的 7z/7zz。拒绝 HTML、路径越界、链接和加密归档；下载与解压有大小限制。临时文件及 cookie 自动清理，不记录 token 或签名下载地址。
 - HTTPS 默认验证证书。TLS 错误先检查时间、代理和证书；仅在用户明确接受本次跳过证书验证时使用 `--insecure`。
-  **本机补丁（坑 11）**：`curl()` 遇 exit 35（TLS 握手失败）且未显式 `--insecure` 时，会自动降级重试一次，
+  **本机补丁（旧坑 11：TLS 降级）**：`curl()` 遇 exit 35（TLS 握手失败）且未显式 `--insecure` 时，会自动降级重试一次，
   覆盖 prepare / activate / `/api/sub/down` / 文件拉取全链路，并在 stderr 打印降级告警。exit 35 表示握手未完成、
   请求未送达，重试不会重复消费 token。上游 2.0 有意不做此降级，本机网络（Clash/TUN）实测会撞上，故保留。
 - 多 sid 默认间隔 45 秒；明确限流默认冷却 120 秒后重启整条下载链一次。403、验证码和下载许可未通过会报告失败；这些间隔是保守默认值，并非站点承诺。
@@ -91,14 +91,17 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
 
 | # | 问题 | 本机处理 | 上游 2.0 |
 |---|---|---|---|
-| 坑 11 | curl exit 35（TLS 握手失败）会打断 prepare 与 `/api/sub/down` 两步 | `curl()` 遇 exit 35 且未显式 `--insecure` 时**自动降级重试一次**（全链路） | ❌ 有意不降级，须手工加 `--insecure`；对应用例已在本机改写为 `test_curl_only_downgrades_tls_after_exit_35` |
-| 坑 16 | SMB 卷上 macOS AppleDouble 伴生文件 `._xxx.mkv` / `._xxx.srt` 同样按后缀命中，会把字幕落盘成 `._xxx.srt`（播放器不加载） | `video_files()` 与 `unpack_payload()` 一律跳过 `._` 开头的文件 | ❌ 未处理 |
+| TLS 降级（旧坑 11） | curl exit 35（TLS 握手失败）会打断 prepare 与 `/api/sub/down` 两步 | `curl()` 遇 exit 35 且未显式 `--insecure` 时**自动降级重试一次**（全链路） | ❌ 有意不降级，须手工加 `--insecure`；对应用例已在本机改写为 `test_curl_only_downgrades_tls_after_exit_35` |
+| AppleDouble 过滤（旧坑 16） | SMB/exFAT 卷上 macOS AppleDouble 伴生文件 `._xxx.mkv` / `._xxx.srt` 同样按后缀命中，会把字幕落盘成 `._xxx.srt`（播放器不加载） | `video_files()` 与 `unpack_payload()` 一律跳过 `._` 开头的文件 | ❌ 未处理 |
 
 上游 2.0 已吸收本机早前的 5 处补丁（md5 不无谓覆盖、视频容器扩到 mp4/mov/avi 等、临时目录改 `shutil.rmtree`、
 整季合包按集分发、多重 UTF-8 BOM），且做得更强：原子写入（mkstemp + hardlink，含 SMB 无硬链接 fallback）、
 归档路径穿越防护、ZIP 体积/文件数上限、符号链接与加密归档拒绝。
 
 ### 本机环境专属坑（上游文档没有）
+
+> 下面 1–11 是本机坑的独立编号，**与旧版 1~16 条编号不同**，别混读。
+> 旧编号里 **旧坑 11 = TLS 降级**、**旧坑 16 = AppleDouble 过滤**，见上面的补丁对照表。
 
 1. **`/Volumes/*` 网络挂载在默认沙箱下 `ls` 会被 SIGKILL（退出码 137）**。正确流程：① 先 `ls /Volumes` 列出挂载点
    （避开 stale 挂载，遍历会卡死）；② 向用户说明「需要读写 `/Volumes/xxx`，沙箱限制阻止了访问」；
@@ -135,11 +138,12 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
     → 只有 `cmn-Hans2` 那一组的末条与片长吻合（差 12 秒），`cmn-Hans` 少 7 分 27 秒、明显残缺。
     **做法**：解压后逐档打印「条数 + 末条时间戳」，与视频时长比对，选末条落在片长前 ~30s 内的档；
     条数最多的那组通常才是完整轨。仅按语言标签取第一个匹配档会交付残缺字幕。
-11. **`language_of()` 不认 BCP-47 风格的中文标记**：`cmn-Hans`、`cmn-Hant`、`yue-Hant` 这类档名会被判成 `unknown`
-    （现有正则只覆盖 `zh-Hans` / `zh-CN` / `chs` / `简体` 等）。后果：`--language chs` / `cht` 匹配不到任何档，
-    `--language any` 又因同条件候选不唯一直接报错。**当前绕法**：
-    `--language any --select-file "<归档内相对路径>"` 显式指定。（根治方向：给 `language_of()` 补
-    `cmn-hans`→chs、`cmn-hant`→cht、`yue(-hant)`→独立 `yue` 的映射。）
+11. **`language_of()` 曾不认 BCP-47 风格的中文标记（2026-11-03 已修复）**：`cmn-Hans`、`cmn-Hans2`、`cmn-Hant`、
+    `yue-Hant` 这类档名原先被判成 `unknown`，导致 `--language chs/cht` 匹配不到任何档、`--language any` 又因
+    同条件候选不唯一直接报错，只能靠 `--language any --select-file "<归档内相对路径>"` 硬指定。
+    现已补上映射：`cmn-Hans`→`chs`、`cmn-Hant`→`cht`、`yue*`→新增的 `yue`。
+    同时「同条件候选不唯一」的报错会列出每档的**条数与末条时间**，便于对照 `ffprobe` 片长挑完整档（配合第 10 条）。
+    回归用例：`test_bcp47_chinese_track_selection`、`test_yue_language_option_is_accepted`。
 
 ### 回补后的验证方式
 
