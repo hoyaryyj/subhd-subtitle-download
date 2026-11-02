@@ -68,7 +68,7 @@ py -3 scripts/download_subtitle.py --sid "<sid>" --video "D:\Movies\Movie.mp4" -
 
 | 选项 | 行为 |
 | --- | --- |
-| `--language` | 默认 `chs-eng`；支持 `cht-eng`、`chs`、`cht`、`zh-eng`、`zh`、`eng`、`any` |
+| `--language` | 默认 `chs-eng`；支持 `cht-eng`、`chs`、`cht`、`zh-eng`、`zh`、`eng`、`yue`（粤语）、`any` |
 | `--format` | 默认 `auto` 按内容识别并优先 SRT；可筛选 `srt/ass/ssa/vtt`，不转换格式 |
 | `--output-dir` | 默认在视频旁；指定后写入该目录，保留视频基本名 |
 | `--overwrite` | 显式允许替换同名文件；不指定则保留不同内容的已有字幕 |
@@ -104,12 +104,16 @@ python3 -m unittest discover -s tests -v
 
 ## 本机补丁（相对上游 2.0）
 
-本副本基于上游 `06705a7`，回补了 2 处上游未覆盖的实战补丁（详见 [SKILL.md](SKILL.md) 的「本机补充」节）：
+本副本基于上游 `06705a7`，回补了 2 处上游未覆盖的实战补丁，并修复 1 处上游缺陷（详见 [SKILL.md](SKILL.md) 的「本机补充」节）：
 
-1. **坑 11**：`curl()` 遇 exit 35（TLS 握手失败）且未显式 `--insecure` 时，自动降级重试一次，覆盖全链路。
+1. **TLS 降级（旧坑 11）**：`curl()` 遇 exit 35（TLS 握手失败）且未显式 `--insecure` 时，自动降级重试一次，覆盖全链路。
    上游 2.0 有意不自动降级，对应用例已在本机改写为 `test_curl_only_downgrades_tls_after_exit_35`。
-2. **坑 16**：`video_files()` 与 `unpack_payload()` 跳过 macOS AppleDouble 伴生文件（`._xxx.mkv` / `._xxx.srt`），
-   避免在 SMB 卷上把字幕落盘成 `._xxx.srt`。
+2. **AppleDouble 过滤（旧坑 16）**：`video_files()` 与 `unpack_payload()` 跳过 macOS AppleDouble 伴生文件
+   （`._xxx.mkv` / `._xxx.srt`），避免在 SMB/exFAT 卷上把字幕落盘成 `._xxx.srt`。
+3. **BCP-47 中文标记识别（本机坑 11，2026-11-03 修复）**：`language_of()` 原先不认识 `cmn-Hans` / `cmn-Hans2` /
+   `cmn-Hant` / `yue-Hant`，一律判成 `unknown`，导致 `--language chs|cht` 匹配不到、`--language any` 又因多档歧义报错。
+   现映射为 `cmn-Hans`→`chs`、`cmn-Hant`→`cht`、`yue*`→新增的 `yue`。同时「同条件候选不唯一」的报错会列出
+   每档的条数与末条时间，便于对照 `ffprobe` 片长挑完整档。
 
 旧版 16 条坑与 6 处补丁存档于 git 分支 `archive/local-patches`。
 
