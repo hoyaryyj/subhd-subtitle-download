@@ -84,8 +84,8 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
 
 本机副本基于上游 2.0（`06705a7`《完善 SubHD skill：跨平台使用、精确配对与安全写入》），
 在上游基础上**回补了 2 处上游未覆盖的实战补丁**，并保留上游没有的本机环境经验。
-旧版完整 16 条坑与 6 处补丁存档在 git 分支 `archive/local-patches`
-（`git show archive/local-patches:SKILL.md` / `git show archive/local-patches:scripts/download_subtitle.py`）。
+旧版完整 16 条坑与 6 处补丁存档于**本地** git 分支 `archive/local-patches`（未推送到远端；
+本机可 `git show archive/local-patches:SKILL.md` 查阅）。
 
 ### 本机补丁对照表（相对上游 2.0）
 
@@ -106,10 +106,10 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
 1. **`/Volumes/*` 网络挂载在默认沙箱下 `ls` 会被 SIGKILL（退出码 137）**。正确流程：① 先 `ls /Volumes` 列出挂载点
    （避开 stale 挂载，遍历会卡死）；② 向用户说明「需要读写 `/Volumes/xxx`，沙箱限制阻止了访问」；
    ③ 用户确认后才加 `dangerouslyDisableSandbox=true`，且仅用于已确认的合法挂载点。**不要默认放开沙箱**。
-2. **本机片库在 SMB 上**（`/Volumes/Movie` → QNAP TS464C，`smbfs`，用户 `hoyaryyj`）。SMB 不支持硬链接，
-   `install_subtitle` 已内置 fallback 分支；但**在 SMB 上删文件**时 `rm` 会被 genie-trash 的 DYLD 拦截器拦死
-   （移入废纸篓在 SMB 上失败 → 拒绝删除，`command rm` / `\rm` 都逃不掉）。绕过：
-   `DYLD_INSERT_LIBRARIES= /bin/rm -f <file>`（仍需用户确认 + 沙箱放行，仅限已确认的合法挂载点）。
+2. **片库常挂载在网络卷（SMB）上**（`smbfs`）。SMB 不支持硬链接，`install_subtitle` 已内置 fallback 分支；
+   但**在 SMB 上删文件**时 `rm` 会被 genie-trash 的 DYLD 拦截器拦死（移入废纸篓在 SMB 上失败 → 拒绝删除，
+   `command rm` / `\rm` 都逃不掉）。绕过：`DYLD_INSERT_LIBRARIES= /bin/rm -f <file>`
+   （仍需用户确认 + 沙箱放行，仅限已确认的合法挂载点）。
 3. **限流节奏**：短时间多次下载会命中 `{"msg":"下载频率过高，请稍后再试。"}`（HTTP 200 但 `success=false`）。
    处理：先停手冷却 2~3 分钟，再每集间隔 ~45s；命中限流时退避 45s 重试。批量别用 25s 以内间隔。
    CLI 默认 `--interval 45`、`--cooldown 120`、`--rate-retries 1` 与之吻合。
