@@ -2,7 +2,7 @@
 
 一个可独立运行的 SubHD 字幕下载 skill。输入作品名称让 Agent 搜索，也可以直接传 SubHD 条目地址；支持电影、单集和整季包，按真实季集号配对视频，默认保留已有字幕。
 
-支持 macOS / Linux / Windows 的 Python 环境。Python 3.9+ 与 curl 为必需依赖；ZIP 和直接字幕不需要 pip 包，7z/RAR 按需使用 7z/7zz。网络请求仍会受 SubHD 的验证、配额和接口变化影响，不能保证每台机器都免验证下载。
+支持 macOS / Linux / Windows 的 Python 环境。Python 3.10+ 与 curl 为必需依赖；ZIP 和直接字幕不需要 pip 包，7z/RAR 按需使用 7z/7zz。网络请求仍会受 SubHD 的验证、配额和接口变化影响，不能保证每台机器都免验证下载。
 
 ## 安装为 skill
 
@@ -106,7 +106,7 @@ py -3 scripts/download_subtitle.py --sid "<sid>" --video "D:\Movies\Movie.mp4" -
 python3 -m unittest discover -s tests -v
 ```
 
-测试涵盖错集、防覆盖、语言筛选、编码、实际格式、归档路径和 API/HTTP 失败。发现可用 7-Zip 时会实测创建与解压 7z，否则跳过该项。CI 配置覆盖 macOS、Linux、Windows 的 Python 3.9 和 3.13，不做实时站点请求；CI 以各次实际运行结果为准；本地通过不能代替其他平台的验证。
+测试涵盖错集、防覆盖、语言筛选、编码、实际格式、归档路径和 API/HTTP 失败。发现可用 7-Zip 时会实测创建与解压 7z，否则跳过该项。CI 配置覆盖 macOS、Linux、Windows 的 Python 3.10 和 3.13（3.9 已 EOL，不再纳入矩阵），不做实时站点请求；CI 以各次实际运行结果为准；本地通过不能代替其他平台的验证。
 
 入口为 [SKILL.md](SKILL.md)，CLI 位于 [scripts/download_subtitle.py](scripts/download_subtitle.py)，本地处理位于 [scripts/subtitle_files.py](scripts/subtitle_files.py)。字幕版权归相应权利方，使用应符合用户取得的授权。
 
@@ -127,4 +127,4 @@ python3 -m unittest discover -s tests -v
 
 ---
 
-English: A self-contained Agent Skill and CLI for SubHD subtitles. Requires Python 3.9+ and curl; ZIP/direct subtitles need no pip packages. 7z/RAR require optional 7-Zip. Copy the complete folder into your agent's supported skill directory, or run `python scripts/download_subtitle.py --doctor` and `--help`. Supports movies, episodes, season bundles, language selection, exact episode matching and preservation of existing files. Live access may require browser verification.
+English: A self-contained Agent Skill and CLI for SubHD subtitles. Requires Python 3.10+ and curl; ZIP/direct subtitles need no pip packages. 7z/RAR require optional 7-Zip. Copy the complete folder into your agent's supported skill directory, or run `python scripts/download_subtitle.py --doctor` and `--help`. Supports movies, episodes, season bundles, language selection, exact episode matching and preservation of existing files. Live access may require browser verification.

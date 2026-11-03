@@ -24,7 +24,7 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --doctor
 python3 "<skill-dir>/scripts/download_subtitle.py" --help
 ```
 
-Windows 按实际安装使用 `py -3` 或 `python` 替代 `python3`。Python 3.9+、curl 为运行依赖；ZIP 和直接字幕无需 pip 包，7z/RAR 按需安装 7-Zip。`--doctor` 只检查本地可执行程序，不代表已联网成功。依赖缺失时给出对应平台的安装方式，不擅自安装全局软件。
+Windows 按实际安装使用 `py -3` 或 `python` 替代 `python3`。Python 3.10+、curl 为运行依赖；ZIP 和直接字幕无需 pip 包，7z/RAR 按需安装 7-Zip。`--doctor` 只检查本地可执行程序，不代表已联网成功。依赖缺失时给出对应平台的安装方式，不擅自安装全局软件。
 
 ## 搜索与选择
 
