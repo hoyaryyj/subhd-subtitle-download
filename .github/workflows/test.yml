@@ -5,9 +5,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS runner 在公开仓库虽不计费，但容量紧张：2026-11-03 两次运行中 macOS job
+        # 均未分配到机器（steps=0），排队 15 分钟后被取消，把整个 run 拖成失败。
+        # 因此 macOS 只保留一个 Python 版本，两套版本的覆盖交给 ubuntu / windows 承担。
+        os: [ubuntu-latest, windows-latest]
         python: ['3.10', '3.13']
+        include:
+          - os: macos-latest
+            python: '3.13'
     runs-on: ${{ matrix.os }}
+    # 实测各 job 均在 1 分钟内完成；设上限，避免被饥饿的 runner 长时间占位
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
