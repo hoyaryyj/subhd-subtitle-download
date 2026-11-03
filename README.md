@@ -106,7 +106,7 @@ py -3 scripts/download_subtitle.py --sid "<sid>" --video "D:\Movies\Movie.mp4" -
 python3 -m unittest discover -s tests -v
 ```
 
-测试涵盖错集、防覆盖、语言筛选、编码、实际格式、归档路径和 API/HTTP 失败。发现可用 7-Zip 时会实测创建与解压 7z，否则跳过该项。CI 配置覆盖 macOS、Linux、Windows 的 Python 3.10 和 3.13（3.9 已 EOL，不再纳入矩阵），不做实时站点请求；CI 以各次实际运行结果为准；本地通过不能代替其他平台的验证。
+测试涵盖错集、防覆盖、语言筛选、编码、实际格式、归档路径和 API/HTTP 失败。发现可用 7-Zip 时会实测创建与解压 7z，否则跳过该项。CI 覆盖 ubuntu / windows 的 Python 3.10 与 3.13，外加 macOS 3.13（macOS runner 容量紧张，只保留一个版本；3.9 已 EOL 不纳入矩阵），不做实时站点请求；CI 以各次实际运行结果为准；本地通过不能代替其他平台的验证。
 
 入口为 [SKILL.md](SKILL.md)，CLI 位于 [scripts/download_subtitle.py](scripts/download_subtitle.py)，本地处理位于 [scripts/subtitle_files.py](scripts/subtitle_files.py)。字幕版权归相应权利方，使用应符合用户取得的授权。
 
