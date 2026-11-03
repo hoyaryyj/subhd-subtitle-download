@@ -156,6 +156,20 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
     此时再下载只会得到 `unchanged`，覆盖反而有劣化风险。**动手前先 `ls` 目标目录并 md5 比对现有字幕**，
     确认到底「缺字幕」还是「已有字幕、只是用户不知道」。
 
+### 通用性审计修复（2026-11-04）
+
+对全量代码做可移植性审计后修复 7 处，每处都有回归用例：
+
+| 问题 | 修复 |
+|---|---|
+| 目录含合并集文件（`S01E01E02`）时 `parse_episode` 抛异常，拖垮整个 `--dir` 模式 | 新增 `episode_tokens()`：解析失败跳过并告警，不中断整批；显式 `--video` 仍保持严格 |
+| Big5 等非 GB18030 编码被 `gb18030` 兜底解成私用区乱码却报成功 | 新增 `looks_decodable()`：私用区/替换符占比 >0.5% 即判失败并提示 `--encoding`；显式 `--encoding` 一律尊重 |
+| 片名含 `Yue` 即整档判成粤语 | `yue` 只认语言位（`yue-Hant`、`yue.srt`），不再匹配 `Yue.2026.…` |
+| Windows 保留设备名（CON/NUL/COM1…）未被拦截 | `--name` 增加保留名校验 |
+| 毫秒用 `.` 分隔的 SRT 被判为非字幕 | SRT 时间轴正则接受 `[,.]` |
+| `from scripts import download_subtitle` 报 `ModuleNotFoundError: subtitle_files` | 顶部 import 增加相对导入回退，脚本/包两种入口都可用 |
+| UA 为自建字符串，跨网络更易被 Cloudflare 挑战 | 回退浏览器 UA（与 1.x 一致） |
+
 ### 回补后的验证方式
 
 ```bash

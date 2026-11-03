@@ -99,6 +99,24 @@ class LocalTests(unittest.TestCase):
             self.assertIn('cmn-Hans2', message)
             self.assertIn('末条', message)
 
+    def test_big5_is_not_silently_decoded_as_gb18030(self):
+        # 2026-11-04 审计：gb18030 兜底会把 Big5 解成私用区乱码却报成功
+        raw = '1\n00:00:01,000 --> 00:00:02,000\n這是一句測試台詞\n'.encode('big5')
+        with self.assertRaises(local.SubtitleError):
+            local.decode_subtitle(raw)
+        self.assertEqual(local.decode_subtitle(raw, 'big5').splitlines()[2], '這是一句測試台詞')
+
+    def test_yue_title_does_not_override_language(self):
+        # 2026-11-04 审计：片名里出现 Yue 曾让整档被判成粤语
+        self.assertEqual(local.language_of('Yue.2026.1080p.chs.srt'), 'chs')
+        self.assertEqual(local.language_of('The.Yue.Story.2026.chs.ass'), 'chs')
+        self.assertEqual(local.language_of('Movie.2026.yue-Hant.srt'), 'yue')
+        self.assertEqual(local.language_of('Movie.2026.yue.srt'), 'yue')
+
+    def test_srt_with_dot_millisecond_separator(self):
+        # 2026-11-04 审计：部分工具产出的 SRT 用 "." 作毫秒分隔符
+        self.assertEqual(local.detect_subtitle_format('1\n00:00:01.000 --> 00:00:02.000\nhi\n'), 'srt')
+
     def test_bundle_selects_episode_language_and_format(self):
         with tempfile.TemporaryDirectory() as d:
             files = []
@@ -232,6 +250,11 @@ class NetworkTests(unittest.TestCase):
             with self.assertRaises(local.SubtitleError):
                 app.trusted_url(value)
 
+    def test_user_agent_is_browser_like(self):
+        # 2026-11-04 审计：自建 UA 在不同网络下更易被 Cloudflare 挑战，回退浏览器串
+        self.assertIn('Mozilla/5.0', app.UA)
+        self.assertIn('Chrome/', app.UA)
+
     def test_api_json_rate_limit_and_permission_are_distinct(self):
         with self.assertRaises(app.RateLimited):
             app.api_response(b'{"success":false,"msg":"rate limit"}', 'prepare')
@@ -316,6 +339,30 @@ class CliTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(script), '--doctor'], capture_output=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)['ready'])
+
+    def test_merged_episode_file_does_not_abort_directory_mode(self):
+        # 2026-11-04 审计：一个 S01E01E02 曾让两种 --dir 模式整体抛错
+        for name in ('Show.S01E01.mp4', 'Show.S01E02.mp4', 'Show.S01E01E02.mp4'):
+            (self.root / name).touch()
+        with contextlib.redirect_stderr(io.StringIO()):
+            pack = app.validate_args(self.args('--sid', 'Ab12Cd', '--dir', str(self.root), '--season', '1'))
+            legacy = app.validate_args(self.args('--dir', str(self.root), '--sids', 'Ab12Cd,De34Fg', '--season', '1'))
+        self.assertEqual([v.name for v in pack[0][1]], ['Show.S01E01.mp4', 'Show.S01E02.mp4'])
+        self.assertEqual([v.name for job in legacy for v in job[1]], ['Show.S01E01.mp4', 'Show.S01E02.mp4'])
+
+    def test_windows_reserved_names_are_rejected(self):
+        # 2026-11-04 审计：CON/NUL/COM1 等在 Windows 上无法创建文件，应提前拦下
+        for name in ('CON', 'nul', 'COM1', 'LPT9', 'con.txt'):
+            with self.subTest(name=name), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(local.SubtitleError):
+                app.validate_args(self.args('--sid', 'Ab12Cd', '--name', name, '--output-dir', str(self.root)))
+
+    def test_package_import_works(self):
+        # 2026-11-04 审计：from scripts import download_subtitle 曾因同级 import 失败
+        root = Path(app.__file__).resolve().parents[1]
+        code = f'import sys; sys.path.insert(0, {str(root)!r}); from scripts import download_subtitle as m; print(m.BASE)'
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('subhd.cc', result.stdout)
 
     def test_appledouble_files_are_not_treated_as_videos(self):
         # 本机补丁（坑 16）：SMB 卷上的 `._xxx.mkv` 必须在扫描阶段被跳过

@@ -29,6 +29,20 @@ def parse_episode(name):
     return next(iter(episodes)) if episodes else None
 
 
+def looks_decodable(text):
+    """
+    判断一次「成功解码」是否可信（2026-11-04 审计修复）。
+
+    错编码往往不会抛异常：Big5 档用 GB18030 兜底几乎总能「解码成功」，
+    但会产出大量私用区字符（U+E000–U+F8FF）或替换符。这类结果不能当字幕交付。
+    正常中英字幕几乎不含私用区字符，故用 0.5% 作为阈值。
+    """
+    if not text:
+        return True
+    suspicious = sum(1 for ch in text if '\ue000' <= ch <= '\uf8ff' or ch == '\ufffd')
+    return suspicious / len(text) <= 0.005
+
+
 def decode_subtitle(raw, encoding=None):
     if encoding:
         choices = [encoding]
@@ -40,10 +54,14 @@ def decode_subtitle(raw, encoding=None):
         choices = ['utf-8-sig', 'gb18030']
     for codec in choices:
         try:
-            return raw.decode(codec).lstrip('\ufeff')
+            text = raw.decode(codec).lstrip('\ufeff')
         except (UnicodeDecodeError, LookupError):
             continue
-    raise SubtitleError('无法解码字幕；请用 --encoding 指定源编码')
+        # 显式 --encoding 一律尊重用户；只有自动兜底才做可信度检查
+        if encoding is None and not looks_decodable(text):
+            continue
+        return text
+    raise SubtitleError('无法解码字幕；请用 --encoding 指定源编码（如 big5 / cp1252 / gb18030）')
 
 
 def detect_subtitle_format(text):
@@ -55,7 +73,8 @@ def detect_subtitle_format(text):
         return 'vtt'
     if re.search(r'(?im)^\[Script Info\]\s*$', text) and re.search(r'(?im)^Dialogue\s*:', text):
         return 'ssa' if re.search(r'(?im)^\[V4 Styles\]', text) else 'ass'
-    if re.search(r'(?m)^\s*\d{1,3}:\d{2}:\d{2},\d{3}\s+-->\s+\d{1,3}:\d{2}:\d{2},\d{3}', text):
+    # 部分工具产出的 SRT 用 "." 作毫秒分隔符；VTT 已在上面用 WEBVTT 头单独识别，此处放宽无冲突
+    if re.search(r'(?m)^\s*\d{1,3}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{1,3}:\d{2}:\d{2}[,.]\d{3}', text):
         return 'srt'
     return None
 
@@ -67,8 +86,10 @@ def language_of(name):
     # cmn-Hans / cmn-Hans2 / cmn-Hant / yue-Hant 是 MA、iTunes WEB-DL 拆轨的常见命名（本机坑 11）。
     chs = bool(re.search(r'简体|简中|简英|chseng|zh[._-](?:cn|hans)|cmn[._-]hans|(?:^|[./\s_&-])chs(?:$|[./\s_&-])', name))
     cht = bool(re.search(r'繁体|繁中|繁英|chteng|zh[._-](?:tw|hant)|cmn[._-]hant|(?:^|[./\s_&-])cht(?:$|[./\s_&-])', name))
-    # 粤语轨（yue / yue-Hant）单列一类，不与简繁混同，避免请求简中时拿到粤语
-    yue = bool(re.search(r'(?:^|[./\s_&-])yue(?:$|[./\s_&-])', name))
+    # 粤语轨（yue / yue-Hant）单列一类，不与简繁混同，避免请求简中时拿到粤语。
+    # 只认「语言位」上的 yue：后面紧跟脚本/地区子标签，或直接就是扩展名。
+    # 否则片名里出现 Yue（如 Yue.2026.1080p.chs.srt）会让整档被误判成粤语（2026-11-04 审计修复）。
+    yue = bool(re.search(r'(?:^|[./\s_&-])yue(?:[._-](?:hant|hans|hk|cn|tw))?(?:$|\.(?:srt|ass|ssa|vtt)$)', name))
     eng = bilingual or bool(re.search(r'英文|英语|english|(?:^|[./\s_&-])(?:en|eng)(?:$|[./\s_&-])', name))
     if yue:
         return 'yue'

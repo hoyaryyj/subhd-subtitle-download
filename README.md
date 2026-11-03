@@ -86,6 +86,14 @@ py -3 scripts/download_subtitle.py --sid "<sid>" --video "D:\Movies\Movie.mp4" -
 
 输出统一为 UTF-8 BOM，后缀由实际内容决定。已有相同字节返回 `unchanged`；同名不同内容返回 `skipped_existing`。退出码 `0` 代表没有失败项，`1` 代表下载或匹配有失败项，`2` 代表参数/依赖/执行错误，`130` 为用户中断。文件写入成功不等于时间轴已与视频同步，必要时播放检查。
 
+## 通用性（跨平台 / 跨设备）
+
+- 代码不含绝对路径，不调用 shell（无 `rm`/`tar`/`which` 依赖），临时目录统一走 `tempfile`。
+- 目录里存在合并集文件（如 `Show.S01E01E02.mkv`）时会跳过并告警，不会中断整批。
+- 编码：UTF BOM / UTF-8 / GB18030 自动识别；**Big5 等其他编码必须显式 `--encoding big5`**，
+  否则会明确报错，而不是静默产出乱码。
+- `--name` 会拒绝 Windows 保留设备名（CON/NUL/COM1…）；脚本方式与 `from scripts import ...` 方式都能用。
+
 ## 依赖和排障
 
 7z/RAR 需要 7-Zip：有 Homebrew 的 macOS 可运行 `brew install sevenzip`；Linux 使用发行版的 `7zip`/`p7zip-full`；Windows 安装 [7-Zip](https://www.7-zip.org/) 并把 7z.exe 加入 PATH。无需为了 ZIP 安装 7-Zip。
