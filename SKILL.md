@@ -144,6 +144,17 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
     现已补上映射：`cmn-Hans`→`chs`、`cmn-Hant`→`cht`、`yue*`→新增的 `yue`。
     同时「同条件候选不唯一」的报错会列出每档的**条数与末条时间**，便于对照 `ffprobe` 片长挑完整档（配合第 10 条）。
     回归用例：`test_bcp47_chinese_track_selection`、`test_yue_language_option_is_accepted`。
+12. **条目描述里的语言列表 ≠ 归档内的真实语言，必须抽样验证**：2026-11-03 实测 `6X61Wg`（标题「含HDR风格字幕」，
+    描述写「简体、英语、德语 SRT、ASS」），归档内 `*.hdr.zh-CN.ass` 的第二轨样式名叫 `EN`，但内容**是德语**——
+    1037 条里 637 条含德语常见词（`Okay. Mach hopp. Sitz.` / `Wir kommen klar.` / `Das waren nur Kinder.`）。
+    那串「简体、英语、德语」不是可选清单，而是这个包里真的混装了多语言档。
+    **做法**：选定档后先抽 5~10 条正文确认语言（尤其「简英双语」的第二轨），确认无误再 install。
+    只看标题 / 描述 / 样式名，会把德语字幕当英文交付。
+13. **交付前先核验目录里是否已有同名且正确的字幕**：2026-11-03 实测本片目录里早已存在
+    `The Dog Stars 2026 2160p AMZN WEB-DL DV HDR10 -Ben The Men.ass`，与 subhd `L5LVQp` 的
+    `The.Dog.Stars.2026.HDR.2160p.WEB.H265-POKE.Chs&Eng.ass` **字节完全一致**（md5 `48ba69923d0f30a9181df06a2224e8fa`）。
+    此时再下载只会得到 `unchanged`，覆盖反而有劣化风险。**动手前先 `ls` 目标目录并 md5 比对现有字幕**，
+    确认到底「缺字幕」还是「已有字幕、只是用户不知道」。
 
 ### 回补后的验证方式
 
