@@ -16,17 +16,46 @@ import tempfile
 import time
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
-from subtitle_files import (
-    SubtitleError, VIDEO_EXTENSIONS, decode_subtitle, detect_subtitle_format,
-    install_subtitle, parse_episode, select_subtitle, unpack_payload,
-)
+try:  # 以脚本方式运行：python3 scripts/download_subtitle.py
+    from subtitle_files import (
+        SubtitleError, VIDEO_EXTENSIONS, decode_subtitle, detect_subtitle_format,
+        install_subtitle, parse_episode, select_subtitle, unpack_payload,
+    )
+except ImportError:  # 作为包被导入：from scripts import download_subtitle
+    from .subtitle_files import (
+        SubtitleError, VIDEO_EXTENSIONS, decode_subtitle, detect_subtitle_format,
+        install_subtitle, parse_episode, select_subtitle, unpack_payload,
+    )
 
 BASE = 'https://www.subhd.cc'
-UA = 'Mozilla/5.0 SubHDSubtitleDownload/2.0'
+# 用浏览器 UA：自建 UA（如 SubHDSubtitleDownload/2.0）在部分网络与 Cloudflare 节点下更易被挑战。
+# 实测本机两种都可用，但浏览器串的可移植性更好（2026-11-04 审计修复，回退自 1.x）。
+UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+      'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36')
 
 
 class RateLimited(SubtitleError):
     pass
+
+
+_WARNED = set()
+
+
+def episode_tokens(path):
+    """
+    目录扫描专用：解析失败（合并集 / 含多个季集号）时返回 None 并告警一次，不中断整批。
+
+    parse_episode 对合并集故意抛异常以防止张冠李戴，但目录扫描里一个坏文件名
+    不该让整个 --dir 模式失败（2026-11-04 审计修复）。
+    """
+    try:
+        return parse_episode(Path(path).stem)
+    except SubtitleError as exc:
+        key = str(path)
+        if key not in _WARNED:
+            _WARNED.add(key)
+            print(f'[skip] {Path(path).name}：{exc}', file=sys.stderr, flush=True)
+        return None
 
 
 def curl(args, insecure=False, timeout=60):
@@ -175,8 +204,11 @@ def video_files(directory, recursive=False):
 
 def find_mkv_for_episode(directory, ep_idx, season=None):
     # Name retained for callers of the original reference script.
-    found = [p for p in video_files(directory) if parse_episode(p.stem) and
-             parse_episode(p.stem)[1] == ep_idx and (season is None or parse_episode(p.stem)[0] == season)]
+    found = []
+    for p in video_files(directory):
+        ep = episode_tokens(p)  # 合并集等无法解析的文件会被跳过，不再让整次扫描失败
+        if ep and ep[1] == ep_idx and (season is None or ep[0] == season):
+            found.append(p)
     return str(found[0]) if len(found) == 1 else None
 
 
@@ -280,33 +312,42 @@ def validate_args(args):
         if report.exists() or not report.parent.is_dir():
             raise SubtitleError('报告路径已存在或父目录不存在；请选择新路径')
     if args.name:
-        if not args.output_dir or re.search(r'[\\/<>:"|?*\x00-\x1f]', args.name) or args.name in ('.', '..') or args.name.endswith((' ', '.')):
-            raise SubtitleError('--name 需要 --output-dir，且基本名不能含路径分隔符或不通用的文件名字符')
+        # Windows 把 CON/NUL/COM1… 当设备名，同名文件无法创建；提前拦下而不是等到写入失败
+        base = args.name.split('.')[0].strip().lower()
+        reserved = {'con', 'prn', 'aux', 'nul'} | {f'com{i}' for i in range(1, 10)} | {f'lpt{i}' for i in range(1, 10)}
+        if (not args.output_dir or re.search(r'[\\/<>:"|?*\x00-\x1f]', args.name)
+                or args.name in ('.', '..') or args.name.endswith((' ', '.')) or base in reserved):
+            raise SubtitleError('--name 需要 --output-dir，且基本名不能含路径分隔符、不通用的文件名字符'
+                                '或 Windows 保留设备名（CON/NUL/COM1…）')
         return [(validate_sid(args.sid), [Path(args.output_dir) / (args.name + '.mp4')])]
     if args.video:
         video = Path(args.video)
         if not video.is_file() or video.suffix.lower() not in VIDEO_EXTENSIONS:
             raise SubtitleError(f'视频不存在或格式不受支持：{video}')
-        parse_episode(video.stem)
+        parse_episode(video.stem)  # 显式指定的视频保持严格：合并集/多集号直接报错
         return [(validate_sid(args.sid), [video])]
-    videos = video_files(args.dir, args.recursive)
-    if args.season is not None:
-        videos = [v for v in videos if parse_episode(v.stem) and parse_episode(v.stem)[0] == args.season]
+    raw_videos = video_files(args.dir, args.recursive)
+    # 无法解析季集号的文件（合并集等）跳过并告警，不让单个坏文件名拖垮整批
+    videos = [v for v in raw_videos if episode_tokens(v) is not None]
     if not videos:
-        raise SubtitleError('未找到符合条件的视频')
-    if args.sid:
-        if any(parse_episode(v.stem) is None for v in videos):
+        if raw_videos and args.sid:
             raise SubtitleError('--sid + --dir 整季包模式要求视频名含 S01E01/S1E1/1x01；电影用 --video')
+        raise SubtitleError('未找到符合条件的视频')
+    if args.season is not None:
+        videos = [v for v in videos if episode_tokens(v)[0] == args.season]
+        if not videos:
+            raise SubtitleError(f'未找到第 {args.season} 季的视频')
+    if args.sid:
         return [(validate_sid(args.sid), videos)]
     sids = args.sids.split(',')
     if not all(s.strip() for s in sids):
         raise SubtitleError('--sids 列表包含空项')
-    seasons = {parse_episode(v.stem)[0] for v in videos if parse_episode(v.stem)}
+    seasons = {episode_tokens(v)[0] for v in videos}
     if len(seasons) != 1:
         raise SubtitleError('--sids 目录季号不唯一；请指定 --season 或分季处理')
     jobs = []
     for idx, sid in enumerate(sids, args.start_episode):
-        matches = [v for v in videos if parse_episode(v.stem) == (next(iter(seasons)), idx)]
+        matches = [v for v in videos if episode_tokens(v) == (next(iter(seasons)), idx)]
         if len(matches) != 1:
             raise SubtitleError(f'E{idx:02d} 视频缺失或不唯一；请使用 --sid + --video 显式指定')
         jobs.append((validate_sid(sid.strip()), matches))
