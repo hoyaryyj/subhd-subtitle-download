@@ -327,11 +327,13 @@ class CliTests(unittest.TestCase):
         return app.argument_parser().parse_args(values)
 
     def test_doctor_does_not_mark_unsupported_python_ready(self):
-        output = io.StringIO()
-        with patch.object(app.sys, 'version_info', (3, 8, 10)), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-            code = app.doctor()
-        self.assertEqual(code, 2)
-        self.assertFalse(json.loads(output.getvalue())['ready'])
+        # 3.10 为支持下限；3.9 已 EOL 且不再进 CI 矩阵，同样应判为不可用
+        for version_info in ((3, 8, 10), (3, 9, 18)):
+            output = io.StringIO()
+            with patch.object(app.sys, 'version_info', version_info), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                code = app.doctor()
+            self.assertEqual(code, 2)
+            self.assertFalse(json.loads(output.getvalue())['ready'])
 
     def test_doctor_json_works_with_non_utf8_terminal(self):
         env = dict(os.environ, PYTHONIOENCODING='cp1252')

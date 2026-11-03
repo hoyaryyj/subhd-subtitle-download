@@ -19,9 +19,9 @@
 
 | 平台 | Python / curl | 遇到 7z/RAR 时 |
 | --- | --- | --- |
-| macOS | 安装 Python 3.9+；系统通常有 curl | 有 Homebrew 时 `brew install sevenzip`，确认 `7zz` 在 PATH |
-| Linux | 安装 Python 3.9+ 与 curl | 发行版提供的 `7zip` 或 `p7zip-full`，确认 `7z/7zz` 可运行 |
-| Windows | 安装 Python 3.9+，使用 `py -3` 或 `python`；Windows 10/11 通常有 curl.exe | 安装 [7-Zip](https://www.7-zip.org/)，将 7z.exe 目录加入 PATH 后重新打开终端 |
+| macOS | 安装 Python 3.10+；系统通常有 curl | 有 Homebrew 时 `brew install sevenzip`，确认 `7zz` 在 PATH |
+| Linux | 安装 Python 3.10+ 与 curl | 发行版提供的 `7zip` 或 `p7zip-full`，确认 `7z/7zz` 可运行 |
+| Windows | 安装 Python 3.10+，使用 `py -3` 或 `python`；Windows 10/11 通常有 curl.exe | 安装 [7-Zip](https://www.7-zip.org/)，将 7z.exe 目录加入 PATH 后重新打开终端 |
 
 无需 `pip install`。ZIP 用 `zipfile`，临时目录用 `tempfile`，清理不依赖 shell `rm/which/tar`。Python 本身的安装路径和包管理器由目标环境决定，不照搬作者机器。
 

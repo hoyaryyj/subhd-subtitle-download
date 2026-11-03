@@ -254,10 +254,10 @@ def doctor():
     result = {'python': sys.version.split()[0], 'platform': sys.platform,
               'curl': shutil.which('curl'), '7zip': shutil.which('7zz') or shutil.which('7z'),
               'zip': 'Python 标准库，无需安装',
-              'network_checked': False, 'ready': bool(shutil.which('curl')) and sys.version_info >= (3, 9)}
+              'network_checked': False, 'ready': bool(shutil.which('curl')) and sys.version_info >= (3, 10)}
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    if sys.version_info < (3, 9):
-        print('请安装 Python 3.9 或更新版本。', file=sys.stderr)
+    if sys.version_info < (3, 10):
+        print('请安装 Python 3.10 或更新版本。', file=sys.stderr)
     if not result['curl']:
         print('请安装 curl 并加入 PATH。Windows 10/11 通常已有 curl.exe；Linux 用系统包管理器安装。', file=sys.stderr)
     if not result['7zip']:
@@ -266,7 +266,7 @@ def doctor():
 
 
 def argument_parser():
-    ap = argparse.ArgumentParser(description='SubHD 字幕搜索/下载：Python 3.9+、curl；ZIP 无额外依赖')
+    ap = argparse.ArgumentParser(description='SubHD 字幕搜索/下载：Python 3.10+、curl；ZIP 无额外依赖')
     ap.add_argument('--doctor', action='store_true', help='检查本地依赖，不联网或修改配置')
     ap.add_argument('--search', metavar='QUERY', help='搜索候选条目（JSON 输出，不自动选择或下载）')
     ap.add_argument('--sid', help='单条 sid 或 https://www.subhd.cc/a/<sid>；可配 --video 或 --dir')
@@ -405,8 +405,8 @@ def main(argv=None):
         jobs = validate_args(args)
         if args.doctor:
             return doctor()
-        if sys.version_info < (3, 9):
-            raise SubtitleError('需要 Python 3.9 或更新版本')
+        if sys.version_info < (3, 10):
+            raise SubtitleError('需要 Python 3.10 或更新版本')
         if not shutil.which('curl'):
             raise SubtitleError('缺少 curl；请先运行 --doctor')
         if args.insecure:
