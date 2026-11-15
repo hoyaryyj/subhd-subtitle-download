@@ -78,7 +78,7 @@ py -3 scripts/download_subtitle.py --sid "<sid>" --video "D:\Movies\Movie.mp4" -
 | `--report` | 将每个目标的成功/保留/失败结果保存为新的 JSON 文件，父目录需存在 |
 | `--interval` | 多 sid 间隔默认 45 秒 |
 | `--cooldown` / `--rate-retries` | 明确限流默认冷却 120 秒后重试一次；最多可设置 3 次 |
-| `--insecure` | 显式跳过证书验证。**本机补丁**：curl exit 35 时会自动降级重试一次（见文末），显式指定则全程使用 |
+| `--insecure` | 仅明确接受本次风险时显式跳过证书验证；TLS 错误不会自动启用 |
 
 完整选项用 `--help` 查看。语言筛选基于文件名和归档内的语言子目录：`zh-eng` 表示中文与英文但未标注简繁，不能当作纯英文；`any` 允许无语言标记，仍拒绝多候选歧义。默认不回退到用户没要求的语言。
 
@@ -96,6 +96,8 @@ py -3 scripts/download_subtitle.py --sid "<sid>" --video "D:\Movies\Movie.mp4" -
 
 ## 依赖和排障
 
+HTTPS 默认验证证书；curl 的隐式配置文件（`.curlrc`）不加载，防止本机配置静默关闭验证或改变重试策略。代理和 CA 环境变量仍由 curl 正常处理。TLS 错误请先检查系统时间、代理及 CA 证书。`--insecure` 只应在明确接受中间人攻击风险后用于本次调用，对搜索和下载链全程生效，不会保存为默认设置。
+
 7z/RAR 需要 7-Zip：有 Homebrew 的 macOS 可运行 `brew install sevenzip`；Linux 使用发行版的 `7zip`/`p7zip-full`；Windows 安装 [7-Zip](https://www.7-zip.org/) 并把 7z.exe 加入 PATH。无需为了 ZIP 安装 7-Zip。
 
 403、验证码、登录页或 `pass=false` 会停止当前条目并报告；可用浏览器正常核查。不要反复请求或把 HTML 当字幕。当前下载限制为 64 MiB，解压限制为 256 MiB / 2000 个成员，加密归档和链接不支持。协议与平台说明见 [references/subhd-protocol.md](references/subhd-protocol.md)。
@@ -112,10 +114,9 @@ python3 -m unittest discover -s tests -v
 
 ## 本机补丁（相对上游 2.0）
 
-本副本基于上游 `06705a7`，回补了 2 处上游未覆盖的实战补丁，并修复 1 处上游缺陷（详见 [SKILL.md](SKILL.md) 的「本机补充」节）：
+本副本基于上游 `06705a7`，保留以下修复及历史补丁说明（详见 [SKILL.md](SKILL.md) 的「本机补充」节）：
 
-1. **TLS 降级（旧坑 11）**：`curl()` 遇 exit 35（TLS 握手失败）且未显式 `--insecure` 时，自动降级重试一次，覆盖全链路。
-   上游 2.0 有意不自动降级，对应用例已在本机改写为 `test_curl_only_downgrades_tls_after_exit_35`。
+1. **TLS 安全默认（旧坑 11）**：已移除 exit 35 后的自动 `--insecure` 重试。握手或证书验证失败原样返回，先排查时间、代理和证书；仅用户明确接受本次风险时才显式使用 `--insecure`。离线回归覆盖错误码 35/60/7、GET/POST 以及显式选择。
 2. **AppleDouble 过滤（旧坑 16）**：`video_files()` 与 `unpack_payload()` 跳过 macOS AppleDouble 伴生文件
    （`._xxx.mkv` / `._xxx.srt`），避免在 SMB/exFAT 卷上把字幕落盘成 `._xxx.srt`。
 3. **BCP-47 中文标记识别（本机坑 11，2026-11-03 修复）**：`language_of()` 原先不认识 `cmn-Hans` / `cmn-Hans2` /
