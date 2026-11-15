@@ -262,24 +262,71 @@ class NetworkTests(unittest.TestCase):
             with self.assertRaises(local.SubtitleError):
                 app.api_response(raw, 'prepare')
 
-    def test_curl_only_downgrades_tls_after_exit_35(self):
-        # 本机补丁（坑 11）：与上游 2.0 有意不同 —— exit 35 表示 TLS 握手未完成、请求未送达，
-        # 此时自动加 --insecure 重试一次；非 35 的错误码一律不降级、不重放。
+    def test_curl_never_automatically_disables_tls_verification(self):
+        for rc in (35, 60, 7):
+            for method in ([], ['-X', 'POST']):
+                with self.subTest(rc=rc, method=method):
+                    response = subprocess.CompletedProcess([], rc, b'', b'TLS failed')
+                    with patch.object(app.subprocess, 'run', return_value=response) as run:
+                        self.assertEqual(app.curl(['https://www.subhd.cc/test'] + method),
+                                         (rc, b'', b'TLS failed'))
+                    run.assert_called_once()
+                    command = run.call_args[0][0]
+                    self.assertEqual(command[:2], ['curl', '--disable'])
+                    self.assertNotIn('--insecure', command)
+                    self.assertIn('--fail', command)
+                    if method:
+                        self.assertNotIn('--retry', command)
+
+    def test_curl_insecure_requires_explicit_opt_in(self):
+        self.assertFalse(app.argument_parser().parse_args([]).insecure)
+        self.assertTrue(app.argument_parser().parse_args(['--insecure']).insecure)
+        for rc in (0, 35, 60):
+            with self.subTest(rc=rc):
+                response = subprocess.CompletedProcess([], rc, b'body', b'error')
+                with patch.object(app.subprocess, 'run', return_value=response) as run:
+                    self.assertEqual(app.curl(['https://www.subhd.cc/test'], insecure=True),
+                                     (rc, b'body', b'error'))
+                run.assert_called_once()
+                self.assertIn('--insecure', run.call_args[0][0])
+
+    def test_tls_error_stops_request_without_replay(self):
         response = subprocess.CompletedProcess([], 35, b'', b'TLS failed')
         with patch.object(app.subprocess, 'run', return_value=response) as run:
-            self.assertEqual(app.curl(['https://www.subhd.cc/test', '-X', 'POST'])[0], 35)
-        self.assertEqual(run.call_count, 2)
-        first = run.call_args_list[0][0][0]
-        second = run.call_args_list[1][0][0]
-        self.assertIn('--fail', first)
-        self.assertNotIn('--insecure', first)
-        self.assertNotIn('--retry', first)
-        self.assertIn('--insecure', second)
-        failed = subprocess.CompletedProcess([], 7, b'', b'connect failed')
-        with patch.object(app.subprocess, 'run', return_value=failed) as other:
-            self.assertEqual(app.curl(['https://www.subhd.cc/test'])[0], 7)
-        self.assertEqual(other.call_count, 1)
-        self.assertNotIn('--insecure', other.call_args[0][0])
+            with self.assertRaisesRegex(local.SubtitleError, 'curl exit 35'):
+                app.request(app.BASE + '/api/sub/prepare-download', sid='test', post=True)
+        run.assert_called_once()
+        self.assertNotIn('--insecure', run.call_args[0][0])
+
+    def test_tls_failure_at_each_download_stage_never_replays(self):
+        bodies = [b'{"success":true,"url":"/down/Ab12Cd"}', b'ok',
+                  b'{"success":true,"pass":true,"url":"https://dl.subhd.me/test.srt"}']
+        for insecure in (False, True):
+            for rc in (35, 60):
+                for stage in range(4):
+                    with self.subTest(insecure=insecure, rc=rc, stage=stage), tempfile.TemporaryDirectory() as d:
+                        responses = [subprocess.CompletedProcess([], 0, body, b'')
+                                     for body in bodies[:stage]]
+                        responses.append(subprocess.CompletedProcess([], rc, b'', b'TLS failed'))
+                        args = app.argument_parser().parse_args(['--insecure'] if insecure else [])
+                        with patch.object(app.subprocess, 'run', side_effect=responses) as run, patch.object(app.time, 'sleep') as sleep:
+                            with self.assertRaisesRegex(local.SubtitleError, f'curl exit {rc}'):
+                                app.fetch_with_backoff('Ab12Cd', d, 'cookie', args)
+                        self.assertEqual(run.call_count, stage + 1)
+                        sleep.assert_not_called()
+                        for call in run.call_args_list:
+                            self.assertEqual('--insecure' in call.args[0], insecure)
+
+    def test_cli_search_honors_explicit_tls_choice(self):
+        for insecure in (False, True):
+            args = ['--search', 'Show'] + (['--insecure'] if insecure else [])
+            with patch.object(app.shutil, 'which', return_value='curl'), patch.object(app, 'search', return_value=[]) as search, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(app.main(args), 0)
+            search.assert_called_once_with('Show', insecure=insecure)
+            self.assertEqual('--insecure' in stderr.getvalue(), insecure)
+            with patch.object(app, 'request', return_value=b'<a href="/a/Ab12Cd">Show</a>') as request:
+                app.search('Show', insecure=insecure)
+            self.assertEqual(request.call_args.kwargs['insecure'], insecure)
 
     def test_http_403_and_429_are_not_success(self):
         for message, error in ((b'HTTP 403', local.SubtitleError), (b'HTTP 429', app.RateLimited)):

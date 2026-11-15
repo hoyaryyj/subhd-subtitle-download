@@ -65,9 +65,7 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
 - 默认在视频旁写入；`--output-dir` 可改位置。远程/NAS 路径遵守当前环境的访问权限；失败时说明路径和权限问题，不改沙箱配置或绕过文件删除保护。
 - 文件头和结构决定字幕/归档格式，ZIP 用标准库解压，7z/RAR 用可用的 7z/7zz。拒绝 HTML、路径越界、链接和加密归档；下载与解压有大小限制。临时文件及 cookie 自动清理，不记录 token 或签名下载地址。
 - HTTPS 默认验证证书。TLS 错误先检查时间、代理和证书；仅在用户明确接受本次跳过证书验证时使用 `--insecure`。
-  **本机补丁（旧坑 11：TLS 降级）**：`curl()` 遇 exit 35（TLS 握手失败）且未显式 `--insecure` 时，会自动降级重试一次，
-  覆盖 prepare / activate / `/api/sub/down` / 文件拉取全链路，并在 stderr 打印降级告警。exit 35 表示握手未完成、
-  请求未送达，重试不会重复消费 token。上游 2.0 有意不做此降级，本机网络（Clash/TUN）实测会撞上，故保留。
+  curl exit 35（握手失败）、60（证书校验失败）等错误不会自动关闭证书验证或触发不安全重试。
 - 多 sid 默认间隔 45 秒；明确限流默认冷却 120 秒后重启整条下载链一次。403、验证码和下载许可未通过会报告失败；这些间隔是保守默认值，并非站点承诺。
 
 下载协议细节、异常和平台依赖说明见 [references/subhd-protocol.md](references/subhd-protocol.md)，仅在排障或调整实现时阅读。
@@ -83,7 +81,7 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
 ## 本机补充（相对上游 2.0）
 
 本机副本基于上游 2.0（`06705a7`《完善 SubHD skill：跨平台使用、精确配对与安全写入》），
-在上游基础上**回补了 2 处上游未覆盖的实战补丁**，并保留上游没有的本机环境经验。
+在上游基础上保留以下修复及历史补丁说明，并保留上游没有的本机环境经验。
 旧版完整 16 条坑与 6 处补丁存档于**本地** git 分支 `archive/local-patches`（未推送到远端；
 本机可 `git show archive/local-patches:SKILL.md` 查阅）。
 
@@ -91,7 +89,7 @@ python3 "<skill-dir>/scripts/download_subtitle.py" --sid "<sid>" --name "Movie.2
 
 | # | 问题 | 本机处理 | 上游 2.0 |
 |---|---|---|---|
-| TLS 降级（旧坑 11） | curl exit 35（TLS 握手失败）会打断 prepare 与 `/api/sub/down` 两步 | `curl()` 遇 exit 35 且未显式 `--insecure` 时**自动降级重试一次**（全链路） | ❌ 有意不降级，须手工加 `--insecure`；对应用例已在本机改写为 `test_curl_only_downgrades_tls_after_exit_35` |
+| TLS 安全默认（旧坑 11） | TLS 握手失败需排查时间、代理和证书 | 已移除自动降级；仅用户明确接受本次风险后使用显式 `--insecure` | 与上游默认不降级一致 |
 | AppleDouble 过滤（旧坑 16） | SMB/exFAT 卷上 macOS AppleDouble 伴生文件 `._xxx.mkv` / `._xxx.srt` 同样按后缀命中，会把字幕落盘成 `._xxx.srt`（播放器不加载） | `video_files()` 与 `unpack_payload()` 一律跳过 `._` 开头的文件 | ❌ 未处理 |
 
 上游 2.0 已吸收本机早前的 5 处补丁（md5 不无谓覆盖、视频容器扩到 mp4/mov/avi 等、临时目录改 `shutil.rmtree`、

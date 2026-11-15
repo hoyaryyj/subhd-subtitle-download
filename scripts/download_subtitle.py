@@ -59,16 +59,9 @@ def episode_tokens(path):
 
 
 def curl(args, insecure=False, timeout=60):
-    """
-    统一 curl 调用。
-
-    本机补丁（旧坑 11：TLS 降级）：默认不主动降级 TLS；仅当 curl exit 35（TLS 握手失败）时，
-    自动加 --insecure 重试一次，覆盖 prepare / activate / down / 文件拉取全链路。
-    exit 35 表示握手未完成、HTTP 请求尚未送达服务端，重试不会重复消费 token；
-    上游 2.0 有意不做此降级（对应测试已在本机同步改写），本机网络（Clash/TUN）实测
-    prepare 与 /api/sub/down 两步都可能撞上 exit 35，故保留。
-    """
-    cmd = ['curl', '--silent', '--show-error', '--fail', '--location',
+    """调用 curl；TLS 失败原样返回，仅显式 insecure=True 时跳过证书验证。"""
+    # Ignore implicit .curlrc options (including insecure/retry-all-errors).
+    cmd = ['curl', '--disable', '--silent', '--show-error', '--fail', '--location',
            '--max-redirs', '3', '--retry-max-time', '30', '--proto', '=https', '--proto-redir', '=https',
            '--connect-timeout', '15', '--max-time', str(timeout),
            '--max-filesize', str(64 * 1024 * 1024)]
@@ -77,10 +70,6 @@ def curl(args, insecure=False, timeout=60):
     if insecure:
         cmd.append('--insecure')
     result = subprocess.run(cmd + args, capture_output=True)
-    if result.returncode == 35 and not insecure:
-        print('[warn] curl exit 35（TLS 握手失败），降级 --insecure 重试一次；'
-              '本次跳过证书校验，目标 URL 来自 SubHD 上游', file=sys.stderr, flush=True)
-        return curl(args, insecure=True, timeout=timeout)
     return result.returncode, result.stdout, result.stderr
 
 
@@ -127,6 +116,9 @@ def request(url, cookie_jar=None, sid=None, post=False, insecure=False, output=N
             raise RateLimited('HTTP 429：下载频率过高')
         if rc == 22 and '403' in error:
             raise SubtitleError('HTTP 403：站点拒绝访问或需要浏览器验证；停止自动重试')
+        if rc in (35, 60):
+            raise SubtitleError(f'curl exit {rc}: {error}；TLS 失败，未自动关闭证书验证。'
+                                '请检查系统时间、代理和 CA 证书；仅明确接受风险时使用 --insecure。')
         raise SubtitleError(f'curl exit {rc}: {error}')
     return body
 
@@ -238,8 +230,8 @@ class SearchParser(HTMLParser):
             self.current = None
 
 
-def search(query):
-    body = request(BASE + '/search/' + quote(query, safe=''))
+def search(query, insecure=False):
+    body = request(BASE + '/search/' + quote(query, safe=''), insecure=insecure)
     text = body.decode('utf-8', errors='replace')
     if re.search(r'(?i)just a moment|cf-chl-|captcha', text):
         raise SubtitleError('搜索遇到浏览器验证；请用可用浏览器搜索并复制 /a/ 地址')
@@ -412,7 +404,7 @@ def main(argv=None):
         if args.insecure:
             print('[警告] --insecure 已显式开启，本次 HTTPS 不验证证书', file=sys.stderr, flush=True)
         if args.search:
-            print(json.dumps(search(args.search), ensure_ascii=False, indent=2))
+            print(json.dumps(search(args.search, insecure=args.insecure), ensure_ascii=False, indent=2))
             return 0
         return run_downloads(jobs, args)
     except (SubtitleError, OSError, subprocess.SubprocessError, ValueError) as exc:
